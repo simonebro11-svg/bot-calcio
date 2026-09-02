@@ -98,4 +98,7 @@ def gestisci_messaggi(message):
         bot.send_message(message.chat.id, report, parse_mode="Markdown")
 
 print("🚀 Bot Admin-Live pronto e attivo sul tuo Desktop!")
-bot.infinity_polling()
+bot.remove_webhook()
+print("🚀 Bot Admin-Live pronto e attivo nel Cloud!")
+bot.infinity_polling(skip_pending=True)
+
