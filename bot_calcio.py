@@ -50,7 +50,7 @@ def gestisci_messaggi(message):
                 bot.reply_to(message, "❌ Password amministratore errata!")
                 return
                 
-            if campeonato not in DATABASE_CAMPIONATI:
+            if campionato not in DATABASE_CAMPIONATI:
                 bot.reply_to(message, "❌ Campionato non esistente. Usa: `serie a`, `premier league`, `la liga`, `bundesliga` o `ligue 1`.")
                 return
             
