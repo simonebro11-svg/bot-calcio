@@ -1,6 +1,8 @@
 import telebot
+import http.server
+import threading
 
-# INSERISCI QUI IL TUO TOKEN DI TELEGRAM RILASCIATO DA BOTFATHER
+# INSERISCI QUI IL TUO REALE TOKEN RILASCIATO DA BOTFATHER
 TELEGRAM_BOT_TOKEN = "8977059725:AAFVBTr1uqaEeCXmcnRsjsGxktzmaD-Zdu8"
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -45,10 +47,10 @@ def invia_benvenuto(message):
 
 @bot.message_handler(func=lambda message: True)
 def genera_palinsesto_automatico(message):
-    # CORRETTO: Variabile definita interamente con la 'i' per evitare NameError
+    # BLINDATO: Variabile scritta con la 'i' ovunque per annullare i NameError dei log
     campionato_utente = message.text.strip().lower()
 
-    if campeonato_utente not in SQUADRE_EUROPEE:
+    if campionato_utente not in SQUADRE_EUROPEE:
         bot.reply_to(message, "⚠️ Campionato non supportato. Scrivi: `Serie A`, `Premier League`, `La Liga`, `Bundesliga` o `Ligue 1`.")
         return
 
@@ -57,7 +59,6 @@ def genera_palinsesto_automatico(message):
     try:
         lista_squadre = SQUADRE_EUROPEE[campionato_utente]
         
-        # Algoritmo pulito per generare 10 accoppiamenti unici a turno senza ripetizioni
         matches = []
         metascoro = len(lista_squadre) // 2
         for i in range(metascoro):
@@ -69,7 +70,6 @@ def genera_palinsesto_automatico(message):
         report += f"📅 *Palinsesto Completo Generato H24*\n----------------------------------------\n\n"
 
         for casa, ospite in matches:
-            # Algoritmo predittivo basato sulla stringa fissa dei nomi
             hash_match = abs(hash(str(casa)) + hash(str(ospite)))
             prob_1 = 38 + (hash_match % 26)
             prob_2 = 18 + (hash_match % 21)
@@ -98,7 +98,17 @@ def genera_palinsesto_automatico(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Errore durante la simulazione del palinsesto: {e}")
 
-# Rimozione webhook pendenti per stabilizzare il deploy ed evitare il bug 409 Conflict
+# --- MINI SERVER PER EVITARE IL BLOCCO PORTE DI RENDER ---
+def run_fake_server():
+    server_address = ('', 10000)
+    httpd = http.server.HTTPServer(server_address, http.server.SimpleHTTPRequestHandler)
+    print("🌍 Server civetta per Render attivo sulla porta 10000.")
+    httpd.serve_forever()
+
+# Avvio del server su un canale parallelo (Thread)
+threading.Thread(target=run_fake_server, daemon=True).start()
+
+# Connessione a Telegram pulita
 bot.remove_webhook()
 print("🚀 Server Autonomo Online! Schedine europee attive.")
 bot.infinity_polling(skip_pending=True)
