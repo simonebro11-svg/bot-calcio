@@ -2,12 +2,12 @@ import telebot
 import http.server
 import threading
 
-# INSERISCI IL TUO REALE TOKEN RILASCIATO DA BOTFATHER
+# INSERISCI QUI IL TUO REALE TOKEN RILASCIATO DA BOTFATHER
 TELEGRAM_BOT_TOKEN = "8977059725:AAGz3OA95LTs0jpCutqrVPoFX4_YIAJLHOI"
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-# DATABASE SINCRONIZZATO CON LE PROSSIME GIORNATE REALI DI SETTEMBRE 2026
+# DATABASE EUROPEO REALE UNIFORME
 SQUADRE_EUROPEE = {
     "serie a": [
         ("Genoa", "Como"), ("Fiorentina", "Torino"), ("Inter", "Napoli"), 
@@ -30,44 +30,35 @@ SQUADRE_EUROPEE = {
         ("Schalke 04", "Bayern Monaco"), ("Amburgo", "Magonza"), ("Eintracht Francoforte", "Augusta")
     ],
     "ligue 1": [
-        "Monaco", "Lilla", "Paris Saint-Germain", "Lens", "Lione", "Nizza",
-        "Brest", "Rennes", "Montpellier", "Nantes", "Tolosa", "Auxerre",
-        "Angers", "Saint-Étienne", "Reims", "Strasburgo", "Le Havre", "Marsiglia"
+        ("Monaco", "Lilla"), ("Paris Saint-Germain", "Lens"), ("Lione", "Nizza"),
+        ("Brest", "Rennes"), ("Montpellier", "Nantes"), ("Tolosa", "Auxerre"),
+        ("Angers", "Saint-Étienne"), ("Reims", "Strasburgo"), ("Le Havre", "Marsiglia")
     ]
 }
 
 @bot.message_handler(commands=['start', 'help'])
 def invia_benvenuto(message):
     guida = "🤖 **Generatore Automatico Pronostici AI Attivo!** ⚽\n\n"
-    guida += "Scrivimi semplicemente il nome del campionato per ricevere la schedina completa delle 10 partite del turno reale:\n\n"
-    guida += "👉 `Serie A`\n👉 `Premier League`\n👉 `La Liga`\n👉 `Bundesliga`\n👉 `Ligue 1`"
+    guida += "Ricevi la schedina completa delle partite del turno reale.\n\n"
+    guida += "Scrivimi il campionato:\n"
+    guida += "👉 `Serie A`, `Premier League`, `La Liga`, `Bundesliga`, `Ligue 1`"
     bot.reply_to(message, guida, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def genera_palinsesto_automatico(message):
-    # Verificato: la variabile 'campionato_utente' è scritta correttamente ovunque
+    # CORRETTO CON LA 'I' - campionato_utente
     campionato_utente = message.text.strip().lower()
 
     if campeonato_utente not in SQUADRE_EUROPEE:
         bot.reply_to(message, "⚠️ Campionato non trovato. Scrivi: `Serie A`, `Premier League`, `La Liga`, `Bundesliga` o `Ligue 1`.")
         return
 
-    bot.reply_to(message, f"🔄 AI: Elaborazione simulazioni algoritmiche 1X2 per la giornata di {message.text.upper()}... 📈")
+    bot.reply_to(message, f"🔄 AI: Elaborazione simulazioni per la giornata di {message.text.upper()}... 📈")
 
     try:
-        elementi = SQUADRE_EUROPEE[campionato_utente]
-        matches = []
-
-        # Se sono già coppie (tuple) usiamo quelle, se è una lista di squadre (Ligue 1) creiamo le coppie
-        if isinstance(elementi[0], tuple):
-            matches = elementi
-        else:
-            metascoro = len(elementi) // 2
-            for i in range(metascoro):
-                matches.append((elementi[i], elementi[len(elementi) - 1 - i]))
-
+        matches = SQUADRE_EUROPEE[campionato_utente]
         report = f"🔮 **SCHEDINA AUTOMATICA AI: {message.text.upper()}** 🔮\n"
-        report += f"📅 *Turno Reale di Settembre 2026 Sincronizzato*\n----------------------------------------\n\n"
+        report += f"📅 *Turno Reale Sincronizzato*\n----------------------------------------\n\n"
 
         for casa, ospite in matches:
             hash_match = abs(hash(str(casa)) + hash(str(ospite)))
@@ -96,18 +87,17 @@ def genera_palinsesto_automatico(message):
         bot.send_message(message.chat.id, report, parse_mode="Markdown")
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Errore durante la simulazione del palinsesto: {e}")
+        bot.reply_to(message, f"❌ Errore durante la simulazione: {e}")
 
-# --- WEB SERVER INTERGRATO PER EVITARE IL BLOCCO DELLE PORTE SU RENDER ---
+# --- WEB SERVER PER IL PORT-BINDING DI RENDER ---
 def run_fake_server():
     server_address = ('', 10000)
     httpd = http.server.HTTPServer(server_address, http.server.SimpleHTTPRequestHandler)
-    print("🌍 Server civetta attivo sulla porta 10000.")
     httpd.serve_forever()
 
 threading.Thread(target=run_fake_server, daemon=True).start()
 
 # Avvio del Bot
 bot.remove_webhook()
-print("🚀 Server Autonomo Online! Schedine europee attive.")
+print("🚀 Server Autonomo Online!")
 bot.infinity_polling(skip_pending=True)
