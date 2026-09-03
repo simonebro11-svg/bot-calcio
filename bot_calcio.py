@@ -11,8 +11,8 @@ import telebot
 # CONFIGURAZIONE
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("8977059725:AAHHnbx3s2qiNuZQmgo5riUqfJm4olsXFdM")
+FOOTBALL_API_KEY = os.getenv("d5098bf8021672496d1ee46eecda662a")
 
 PORT = int(os.getenv("PORT", "10000"))
 
