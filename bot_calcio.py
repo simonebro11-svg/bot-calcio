@@ -442,6 +442,41 @@ def recupera_partite_thesportsdb(league_id):
 
         return []
 
+@bot.message_handler(commands=["testdb"])
+def comando_testdb(message):
+
+    print(
+        "🧪 COMANDO /TESTDB RICEVUTO",
+        flush=True
+    )
+
+    partite = recupera_partite_thesportsdb(135)
+
+    if not partite:
+
+        bot.send_message(
+            message.chat.id,
+            "❌ TheSportsDB non ha restituito partite."
+        )
+
+        return
+
+    testo = "🧪 <b>TEST THESPORTSDB</b>\n\n"
+
+    for partita in partite[:10]:
+
+        testo += (
+            f"📅 {partita['data']}\n"
+            f"🏠 {partita['casa']}\n"
+            f"✈️ {partita['trasferta']}\n\n"
+        )
+
+    bot.send_message(
+        message.chat.id,
+        testo,
+        parse_mode="HTML"
+    )
+
 # ============================================================
 # RECUPERA PRONOSTICO
 # ============================================================
