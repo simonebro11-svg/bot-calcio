@@ -292,6 +292,156 @@ def recupera_partite(league_id):
 
     return partite
 
+def recupera_partite_thesportsdb(league_id):
+    """
+    Recupera le prossime partite da TheSportsDB.
+    Per ora utilizzato come test per la stagione 2026-2027.
+    """
+
+    # ID TheSportsDB della Serie A italiana
+    thesportsdb_league_id = 4332
+
+    url = (
+        "https://www.thesportsdb.com/"
+        "api/v1/json/123/eventsseason.php"
+    )
+
+    params = {
+        "id": thesportsdb_league_id,
+        "s": "2026-2027"
+    }
+
+    print("==========================================", flush=True)
+    print("🧪 TEST THESPORTSDB", flush=True)
+    print(f"League ID TheSportsDB: {thesportsdb_league_id}", flush=True)
+    print(f"Stagione: {params['s']}", flush=True)
+    print("==========================================", flush=True)
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30
+        )
+
+        print(
+            f"📡 Status HTTP: {response.status_code}",
+            flush=True
+        )
+
+        response.raise_for_status()
+
+        dati = response.json()
+
+        eventi = dati.get("events") or []
+
+        print(
+            f"📊 Eventi ricevuti: {len(eventi)}",
+            flush=True
+        )
+
+        if not eventi:
+
+            print(
+                f"❌ Nessun evento ricevuto.",
+                flush=True
+            )
+
+            print(
+                f"Risposta API: {dati}",
+                flush=True
+            )
+
+            return []
+
+        partite = []
+
+        for evento in eventi:
+
+            fixture_id = evento.get("idEvent")
+
+            casa = evento.get(
+                "strHomeTeam",
+                "Casa"
+            )
+
+            trasferta = evento.get(
+                "strAwayTeam",
+                "Trasferta"
+            )
+
+            data_partita = evento.get(
+                "strTimestamp"
+            )
+
+            if not data_partita:
+
+                data_partita = evento.get(
+                    "dateEvent"
+                )
+
+            ora = evento.get(
+                "strTimeLocal"
+            )
+
+            print(
+                f"📅 {data_partita} {ora or ''} | "
+                f"{casa} - {trasferta} | "
+                f"ID: {fixture_id}",
+                flush=True
+            )
+
+            if not fixture_id:
+                continue
+
+            partite.append({
+                "id": fixture_id,
+                "casa": casa,
+                "trasferta": trasferta,
+                "data": data_partita
+            })
+
+        partite.sort(
+            key=lambda x: x.get("data") or ""
+        )
+
+        print(
+            f"✅ Partite TheSportsDB trovate: "
+            f"{len(partite)}",
+            flush=True
+        )
+
+        return partite
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"❌ Errore HTTP TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
+
+    except ValueError as e:
+
+        print(
+            f"❌ Errore nella risposta JSON "
+            f"TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
+
 # ============================================================
 # RECUPERA PRONOSTICO
 # ============================================================
