@@ -193,104 +193,225 @@ def api_request(endpoint, params=None):
 # ============================================================
 
 def recupera_partite(league_id):
-    """Recupera le prossime partite del campionato."""
+    """
+    Recupera le prossime partite da TheSportsDB
+    per la stagione 2026-2027.
+    """
 
-    oggi = datetime.now().date()
-    data_fine = oggi + timedelta(days=14)
-    stagione = stagione_corrente()
+    # ID dei campionati su TheSportsDB
+    CAMPIONATI_THESPORTSDB = {
+        135: 4332,  # Serie A
+        39:  4328,  # Premier League
+        140: 4335,  # La Liga
+        78:  4331,  # Bundesliga
+        61:  4334   # Ligue 1
+    }
+
+    thesportsdb_league_id = CAMPIONATI_THESPORTSDB.get(
+        league_id
+    )
+
+    if not thesportsdb_league_id:
+
+        print(
+            f"❌ Campionato non configurato su TheSportsDB: "
+            f"{league_id}",
+            flush=True
+        )
+
+        return []
+
+    url = (
+        "https://www.thesportsdb.com/"
+        "api/v1/json/123/eventsseason.php"
+    )
 
     params = {
-        "league": league_id,
-        "season": stagione,
-        "from": oggi.strftime("%Y-%m-%d"),
-        "to": data_fine.strftime("%Y-%m-%d"),
-        "status": "NS-TBD",
-        "timezone": "Europe/Rome"
+        "id": thesportsdb_league_id,
+        "s": "2026-2027"
     }
 
     print("==========================================", flush=True)
-    print("⚽ RICERCA PARTITE", flush=True)
-    print(f"League ID: {league_id}", flush=True)
-    print(f"Stagione: {stagione}", flush=True)
-    print(f"Dal: {oggi}", flush=True)
-    print(f"Al: {data_fine}", flush=True)
+    print("⚽ RICERCA PARTITE THESPORTSDB", flush=True)
+    print(
+        f"League ID API-Football: {league_id}",
+        flush=True
+    )
+    print(
+        f"League ID TheSportsDB: {thesportsdb_league_id}",
+        flush=True
+    )
+    print(
+        "Stagione: 2026-2027",
+        flush=True
+    )
     print("==========================================", flush=True)
 
-    dati = api_request(
-        "fixtures",
-        params
-    )
+    try:
 
-    if dati is None:
-        print("❌ API-Football non ha restituito dati.", flush=True)
-        return []
-
-    print(
-        f"📊 Risultati API: {dati.get('results', 0)}",
-        flush=True
-    )
-
-    if dati.get("errors"):
-        print(
-            f"❌ Errori API: {dati.get('errors')}",
-            flush=True
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30
         )
-        return []
-
-    partite = []
-
-    for item in dati.get("response", []):
-
-        fixture = item.get("fixture", {})
-        teams = item.get("teams", {})
-
-        fixture_id = fixture.get("id")
-
-        casa = teams.get("home", {}).get(
-            "name",
-            "Casa"
-        )
-
-        trasferta = teams.get("away", {}).get(
-            "name",
-            "Trasferta"
-        )
-
-        data_partita = fixture.get("date")
-
-        status = fixture.get(
-            "status",
-            {}
-        ).get("short")
 
         print(
-            f"📅 {data_partita} | "
-            f"{casa} - {trasferta} | "
-            f"ID: {fixture_id} | "
-            f"Stato: {status}",
+            f"📡 Status HTTP: {response.status_code}",
             flush=True
         )
 
-        if not fixture_id:
-            continue
+        response.raise_for_status()
 
-        partite.append({
-            "id": fixture_id,
-            "casa": casa,
-            "trasferta": trasferta,
-            "data": data_partita
-        })
+        dati = response.json()
 
-    partite.sort(
-        key=lambda x: x.get("data") or ""
-    )
+        eventi = dati.get("events") or []
 
-    print(
-        f"✅ Partite trovate: {len(partite)}",
-        flush=True
-    )
+        print(
+            f"📊 Eventi ricevuti: {len(eventi)}",
+            flush=True
+        )
 
-    return partite
+        if not eventi:
+
+            print(
+                "❌ TheSportsDB non ha restituito eventi.",
+                flush=True
+            )
+
+            print(
+                f"Risposta API: {dati}",
+                flush=True
+            )
+
+            return []
+
+        oggi = datetime.now().date()
+
+        partite = []
+
+        for evento in eventi:
+
+            fixture_id = evento.get("idEvent")
+
+            casa = evento.get(
+                "strHomeTeam",
+                "Casa"
+            )
+
+            trasferta = evento.get(
+                "strAwayTeam",
+                "Trasferta"
+            )
+
+            data_partita = evento.get(
+                "strTimestamp"
+            )
+
+            if not data_partita:
+
+                data_evento = evento.get(
+                    "dateEvent"
+                )
+
+                ora_evento = evento.get(
+                    "strTimeLocal"
+                )
+
+                if data_evento:
+
+                    data_partita = data_evento
+
+                    if ora_evento:
+
+                        data_partita = (
+                            f"{data_evento}T{ora_evento}"
+                        )
+
+            status = evento.get(
+                "strStatus"
+            )
+
+            print(
+                f"📅 {data_partita} | "
+                f"{casa} - {trasferta} | "
+                f"ID: {fixture_id} | "
+                f"Stato: {status}",
+                flush=True
+            )
+
+            if not fixture_id:
+
+                continue
+
+            # Prova a ricavare la data per filtrare
+            # le partite già passate.
+            data_stringa = (
+                data_partita[:10]
+                if data_partita
+                else ""
+            )
+
+            try:
+
+                data_evento = datetime.strptime(
+                    data_stringa,
+                    "%Y-%m-%d"
+                ).date()
+
+            except Exception:
+
+                data_evento = None
+
+            # Ignora le partite già giocate
+            if data_evento and data_evento < oggi:
+
+                continue
+
+            partite.append({
+                "id": fixture_id,
+                "casa": casa,
+                "trasferta": trasferta,
+                "data": data_partita
+            })
+
+        partite.sort(
+            key=lambda x: x.get("data") or ""
+        )
+
+        print(
+            f"✅ Partite future trovate: "
+            f"{len(partite)}",
+            flush=True
+        )
+
+        return partite
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"❌ Errore HTTP TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
+
+    except ValueError as e:
+
+        print(
+            f"❌ Errore JSON TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
 
 def recupera_partite_thesportsdb(league_id):
     """
