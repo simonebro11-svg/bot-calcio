@@ -1015,4 +1015,3 @@ if __name__ == "__main__":
             "Arresto bot...",
             flush=True
         )
-```
