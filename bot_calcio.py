@@ -438,7 +438,17 @@ def crea_report(nome_campionato, league_id):
     """
 
     print(
+        f"🚨 CREAREPORT CHIAMATO: {nome_campionato} | ID: {league_id}",
+        flush=True
+    )
+
+    print(
         f"Recupero partite: {nome_campionato}",
+        flush=True
+    )
+
+    print(
+        "🚨 STO PER CHIAMARE recupera_partite()",
         flush=True
     )
 
