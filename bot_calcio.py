@@ -219,6 +219,20 @@ def recupera_partite(league_id):
         "fixtures",
         params
     )
+    
+print("========== DEBUG API ==========", flush=True)
+print(f"League ID: {league_id}", flush=True)
+print(f"Stagione: {stagione}", flush=True)
+print(f"Data inizio: {oggi}", flush=True)
+print(f"Data fine: {data_fine}", flush=True)
+
+if dati:
+    print(f"Risultati API: {dati.get('results')}", flush=True)
+    print(f"Response ricevuta: {len(dati.get('response', []))}", flush=True)
+else:
+    print("API non ha restituito dati.", flush=True)
+
+print("================================", flush=True)
 
     if not dati:
         return []
