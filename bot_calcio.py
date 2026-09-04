@@ -688,11 +688,101 @@ class HealthHandler(
             b"Bot pronostici calcio online!"
         )
 
-    def do_POST(self):
+        def do_POST(self):
 
-        # Controlla che la richiesta arrivi
-        # dall'endpoint webhook corretto
+        print(
+            f"📩 RICHIESTA POST RICEVUTA - PATH: {self.path}",
+            flush=True
+        )
+
+        print(
+            f"📩 Content-Type: {self.headers.get('Content-Type')}",
+            flush=True
+        )
+
         if self.path != WEBHOOK_PATH:
+
+            print(
+                f"❌ PATH NON CORRETTO: {self.path}",
+                flush=True
+            )
+
+            self.send_response(404)
+            self.end_headers()
+
+            return
+
+        try:
+
+            content_length = int(
+                self.headers.get(
+                    "Content-Length",
+                    0
+                )
+            )
+
+            print(
+                f"📩 Content-Length: {content_length}",
+                flush=True
+            )
+
+            body = self.rfile.read(
+                content_length
+            )
+
+            print(
+                "📩 Dati Telegram ricevuti.",
+                flush=True
+            )
+
+            update = telebot.types.Update.de_json(
+                body.decode("utf-8")
+            )
+
+            print(
+                "✅ Update Telegram decodificato.",
+                flush=True
+            )
+
+            # Rispondiamo subito a Telegram
+            self.send_response(200)
+
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
+            )
+
+            self.end_headers()
+
+            self.wfile.write(
+                b"OK"
+            )
+
+            # Elaboriamo l'update
+            bot.process_new_updates(
+                [update]
+            )
+
+            print(
+                "✅ Update Telegram elaborato.",
+                flush=True
+            )
+
+        except Exception as e:
+
+            print(
+                f"❌ ERRORE WEBHOOK: {e}",
+                flush=True
+            )
+
+            try:
+
+                self.send_response(200)
+                self.end_headers()
+
+            except Exception:
+
+                pass
 
             self.send_response(404)
             self.end_headers()
