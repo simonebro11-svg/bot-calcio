@@ -379,155 +379,6 @@ def recupera_partite(league_id):
         )
 
         return []
-def recupera_partite_thesportsdb(league_id):
-    """
-    Recupera le prossime partite da TheSportsDB.
-    Per ora utilizzato come test per la stagione 2026-2027.
-    """
-
-    # ID TheSportsDB della Serie A italiana
-    thesportsdb_league_id = 4332
-
-    url = (
-        "https://www.thesportsdb.com/"
-        "api/v1/json/123/eventsseason.php"
-    )
-
-    params = {
-        "id": thesportsdb_league_id,
-        "s": "2026-2027"
-    }
-
-    print("==========================================", flush=True)
-    print("🧪 TEST THESPORTSDB", flush=True)
-    print(f"League ID TheSportsDB: {thesportsdb_league_id}", flush=True)
-    print(f"Stagione: {params['s']}", flush=True)
-    print("==========================================", flush=True)
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=30
-        )
-
-        print(
-            f"📡 Status HTTP: {response.status_code}",
-            flush=True
-        )
-
-        response.raise_for_status()
-
-        dati = response.json()
-
-        eventi = dati.get("events") or []
-
-        print(
-            f"📊 Eventi ricevuti: {len(eventi)}",
-            flush=True
-        )
-
-        if not eventi:
-
-            print(
-                f"❌ Nessun evento ricevuto.",
-                flush=True
-            )
-
-            print(
-                f"Risposta API: {dati}",
-                flush=True
-            )
-
-            return []
-
-        partite = []
-
-        for evento in eventi:
-
-            fixture_id = evento.get("idEvent")
-
-            casa = evento.get(
-                "strHomeTeam",
-                "Casa"
-            )
-
-            trasferta = evento.get(
-                "strAwayTeam",
-                "Trasferta"
-            )
-
-            data_partita = evento.get(
-                "strTimestamp"
-            )
-
-            if not data_partita:
-
-                data_partita = evento.get(
-                    "dateEvent"
-                )
-
-            ora = evento.get(
-                "strTimeLocal"
-            )
-
-            print(
-                f"📅 {data_partita} {ora or ''} | "
-                f"{casa} - {trasferta} | "
-                f"ID: {fixture_id}",
-                flush=True
-            )
-
-            if not fixture_id:
-                continue
-
-            partite.append({
-                "id": fixture_id,
-                "casa": casa,
-                "trasferta": trasferta,
-                "data": data_partita
-            })
-
-        partite.sort(
-            key=lambda x: x.get("data") or ""
-        )
-
-        print(
-            f"✅ Partite TheSportsDB trovate: "
-            f"{len(partite)}",
-            flush=True
-        )
-
-        return partite
-
-    except requests.exceptions.RequestException as e:
-
-        print(
-            f"❌ Errore HTTP TheSportsDB: {e}",
-            flush=True
-        )
-
-        return []
-
-    except ValueError as e:
-
-        print(
-            f"❌ Errore nella risposta JSON "
-            f"TheSportsDB: {e}",
-            flush=True
-        )
-
-        return []
-
-    except Exception as e:
-
-        print(
-            f"❌ Errore TheSportsDB: {e}",
-            flush=True
-        )
-
-        return []
 
 @bot.message_handler(commands=["testdb"])
 def comando_testdb(message):
@@ -568,14 +419,18 @@ def comando_testdb(message):
 # RECUPERA PRONOSTICO
 # ============================================================
 
+# ============================================================
+# RECUPERA PRONOSTICO
+# ============================================================
+
 def recupera_pronostico(fixture_id):
     """
-    Genera un pronostico base per una partita.
+    Genera il pronostico per una partita TheSportsDB.
 
-    IMPORTANTE:
+    NOTA:
     fixture_id è l'ID dell'evento TheSportsDB.
 
-    Questa versione non utilizza più API-Football.
+    Questa versione NON utilizza API-Football.
     """
 
     print(
@@ -584,29 +439,36 @@ def recupera_pronostico(fixture_id):
         flush=True
     )
 
-    # Pronostico base temporaneo.
-    #
-    # In questa fase non abbiamo ancora le statistiche
-    # delle due squadre, quindi evitiamo di inventare
-    # percentuali o dati statistici.
-    #
-    # Il sistema definitivo verrà collegato alle statistiche
-    # delle squadre.
-
     pronostico = {
         "esito": "1X",
         "over25": "OVER 1.5",
         "gol": "DA VALUTARE",
         "confidence": 50,
         "motivazione": (
-            "Pronostico preliminare in attesa "
-            "delle statistiche delle squadre."
+            "Pronostico preliminare. "
+            "Analisi statistica dettagliata "
+            "non ancora disponibile."
         )
     }
 
     print(
-        f"✅ Pronostico generato: "
-        f"{pronostico['esito']}",
+        f"✅ Esito: {pronostico['esito']}",
+        flush=True
+    )
+
+    print(
+        f"📈 Over/Under: {pronostico['over25']}",
+        flush=True
+    )
+
+    print(
+        f"⚽ Gol/No Gol: {pronostico['gol']}",
+        flush=True
+    )
+
+    print(
+        f"🎯 Affidabilità: "
+        f"{pronostico['confidence']}%",
         flush=True
     )
 
@@ -640,139 +502,62 @@ def formatta_data(data_string):
 
         return data_string
 
-
 # ============================================================
 # FORMATTA PRONOSTICO
 # ============================================================
 
 def formatta_pronostico(pronostico):
-    """Estrae le informazioni principali dal pronostico."""
+    """
+    Formatta il pronostico per Telegram.
+    """
 
     if not pronostico:
 
         return (
-            "📊 Pronostico non disponibile."
+            "📊 <b>Pronostico non disponibile.</b>"
         )
 
-    predictions = pronostico.get(
-        "predictions",
-        {}
+    esito = pronostico.get(
+        "esito",
+        "N/D"
     )
 
-    vincitore = predictions.get(
-        "winner",
-        {}
+    over25 = pronostico.get(
+        "over25",
+        "N/D"
     )
 
-    squadra_vincente = vincitore.get(
-        "name"
+    gol = pronostico.get(
+        "gol",
+        "N/D"
     )
 
-    commento = predictions.get(
-        "advice"
+    confidence = pronostico.get(
+        "confidence",
+        0
     )
 
-    percentuali = predictions.get(
-        "percent"
+    motivazione = pronostico.get(
+        "motivazione",
+        ""
     )
 
-    risultato = []
-
-    if squadra_vincente:
-
-        risultato.append(
-            f"🏆 Favorita: {squadra_vincente}"
-        )
-
-    if percentuali:
-
-        casa = percentuali.get("home")
-        pareggio = percentuali.get("draw")
-        trasferta = percentuali.get("away")
-
-        if casa or pareggio or trasferta:
-
-            risultato.append(
-                f"📈 Probabilità:\n"
-                f"🏠 Casa: {casa}\n"
-                f"🤝 X: {pareggio}\n"
-                f"✈️ Trasferta: {trasferta}"
-            )
-
-    if commento:
-
-        risultato.append(
-            f"💡 Consiglio: {commento}"
-        )
-
-    if not risultato:
-
-        return (
-            "📊 Pronostico non disponibile."
-        )
-
-    return "\n".join(risultato)
-
-def recupera_partite_thesportsdb(league_id):
-    """Test recupero partite da TheSportsDB."""
-
-    # ID TheSportsDB della Serie A
-    thesportsdb_league_id = 4332
-
-    url = (
-        "https://www.thesportsdb.com/"
-        "api/v1/json/123/eventsseason.php"
+    risultato = (
+        "🔮 <b>PRONOSTICO</b>\n\n"
+        f"🎯 <b>Esito:</b> {esito}\n"
+        f"⚽ <b>Gol:</b> {gol}\n"
+        f"📈 <b>Totale gol:</b> {over25}\n"
+        f"💯 <b>Affidabilità:</b> {confidence}%"
     )
 
-    params = {
-        "id": thesportsdb_league_id,
-        "s": "2026-2027"
-    }
+    if motivazione:
 
-    print("==========================================", flush=True)
-    print("🧪 TEST THESPORTSDB", flush=True)
-    print(f"URL: {url}", flush=True)
-    print(f"Stagione: {params['s']}", flush=True)
-    print("==========================================", flush=True)
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=30
+        risultato += (
+            f"\n\n💡 <b>Analisi:</b>\n"
+            f"{motivazione}"
         )
 
-        print(
-            f"📡 Status HTTP: {response.status_code}",
-            flush=True
-        )
-
-        dati = response.json()
-
-        print(
-            f"📊 Eventi ricevuti: "
-            f"{len(dati.get('events') or [])}",
-            flush=True
-        )
-
-        print(
-            f"❌ Errore: {dati.get('error')}",
-            flush=True
-        )
-
-        return dati.get("events") or []
-
-    except Exception as e:
-
-        print(
-            f"❌ Errore TheSportsDB: {e}",
-            flush=True
-        )
-
-        return []
-    
-
+    return risultato
 
 # ============================================================
 # CREA REPORT
@@ -1386,8 +1171,3 @@ if __name__ == "__main__":
             flush=True
         )
         
-print(
-    f"🧪 RISULTATO TEST: "
-    f"{len(recupera_partite_thesportsdb(4332))} partite",
-    flush=True
-)
