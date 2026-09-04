@@ -202,9 +202,7 @@ def recupera_partite(league_id):
     """Recupera le partite dei prossimi 14 giorni."""
 
     oggi = datetime.now().date()
-
     data_fine = oggi + timedelta(days=14)
-
     stagione = stagione_corrente()
 
     params = {
@@ -215,27 +213,33 @@ def recupera_partite(league_id):
         "timezone": "Europe/Rome"
     }
 
+    print("========== DEBUG API ==========", flush=True)
+    print(f"League ID: {league_id}", flush=True)
+    print(f"Stagione: {stagione}", flush=True)
+    print(f"Data inizio: {oggi}", flush=True)
+    print(f"Data fine: {data_fine}", flush=True)
+
     dati = api_request(
         "fixtures",
         params
     )
-    
-print("========== DEBUG API ==========", flush=True)
-print(f"League ID: {league_id}", flush=True)
-print(f"Stagione: {stagione}", flush=True)
-print(f"Data inizio: {oggi}", flush=True)
-print(f"Data fine: {data_fine}", flush=True)
-
-if dati:
-    print(f"Risultati API: {dati.get('results')}", flush=True)
-    print(f"Response ricevuta: {len(dati.get('response', []))}", flush=True)
-else:
-    print("API non ha restituito dati.", flush=True)
-
-print("================================", flush=True)
 
     if not dati:
+        print("API non ha restituito dati.", flush=True)
+        print("================================", flush=True)
         return []
+
+    print(
+        f"Risultati API: {dati.get('results')}",
+        flush=True
+    )
+
+    print(
+        f"Response ricevuta: {len(dati.get('response', []))}",
+        flush=True
+    )
+
+    print("================================", flush=True)
 
     partite = []
 
@@ -256,7 +260,6 @@ print("================================", flush=True)
             {}
         ).get("short")
 
-        # Solo partite non ancora iniziate
         if status not in ["NS", "TBD"]:
             continue
 
@@ -291,8 +294,12 @@ print("================================", flush=True)
         key=lambda x: x.get("data") or ""
     )
 
-    return partite
+    print(
+        f"Partite valide trovate: {len(partite)}",
+        flush=True
+    )
 
+    return partite
 
 # ============================================================
 # RECUPERA PRONOSTICO
