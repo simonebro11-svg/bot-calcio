@@ -199,7 +199,7 @@ def api_request(endpoint, params):
 # ============================================================
 
 def recupera_partite(league_id):
-    """Recupera le partite dei prossimi 14 giorni."""
+    """Recupera le prossime partite del campionato."""
 
     oggi = datetime.now().date()
     data_fine = oggi + timedelta(days=14)
@@ -210,81 +210,78 @@ def recupera_partite(league_id):
         "season": stagione,
         "from": oggi.strftime("%Y-%m-%d"),
         "to": data_fine.strftime("%Y-%m-%d"),
+        "status": "NS-TBD",
         "timezone": "Europe/Rome"
     }
 
-    print("========== DEBUG API ==========", flush=True)
+    print("==========================================", flush=True)
+    print("⚽ RICERCA PARTITE", flush=True)
     print(f"League ID: {league_id}", flush=True)
     print(f"Stagione: {stagione}", flush=True)
-    print(f"Data inizio: {oggi}", flush=True)
-    print(f"Data fine: {data_fine}", flush=True)
+    print(f"Dal: {oggi}", flush=True)
+    print(f"Al: {data_fine}", flush=True)
+    print("==========================================", flush=True)
 
     dati = api_request(
         "fixtures",
         params
     )
 
-    if not dati:
-        print("API non ha restituito dati.", flush=True)
-        print("================================", flush=True)
+    if dati is None:
+        print("❌ API-Football non ha restituito dati.", flush=True)
         return []
 
     print(
-        f"Risultati API: {dati.get('results')}",
+        f"📊 Risultati API: {dati.get('results', 0)}",
         flush=True
     )
 
-    print(
-        f"Response ricevuta: {len(dati.get('response', []))}",
-        flush=True
-    )
-
-    print("================================", flush=True)
+    if dati.get("errors"):
+        print(
+            f"❌ Errori API: {dati.get('errors')}",
+            flush=True
+        )
+        return []
 
     partite = []
 
     for item in dati.get("response", []):
 
-        fixture = item.get(
-            "fixture",
-            {}
+        fixture = item.get("fixture", {})
+        teams = item.get("teams", {})
+
+        fixture_id = fixture.get("id")
+
+        casa = teams.get("home", {}).get(
+            "name",
+            "Casa"
         )
 
-        teams = item.get(
-            "teams",
-            {}
+        trasferta = teams.get("away", {}).get(
+            "name",
+            "Trasferta"
         )
+
+        data_partita = fixture.get("date")
 
         status = fixture.get(
             "status",
             {}
         ).get("short")
 
-        if status not in ["NS", "TBD"]:
+        print(
+            f"📅 {data_partita} | "
+            f"{casa} - {trasferta} | "
+            f"ID: {fixture_id} | "
+            f"Stato: {status}",
+            flush=True
+        )
+
+        if not fixture_id:
             continue
 
-        casa = teams.get(
-            "home",
-            {}
-        ).get(
-            "name",
-            "Casa"
-        )
-
-        trasferta = teams.get(
-            "away",
-            {}
-        ).get(
-            "name",
-            "Trasferta"
-        )
-
-        data_partita = fixture.get(
-            "date"
-        )
-
         partite.append({
-            "id": fixture.get("id"),
+            "id": fixture_id,
             "casa": casa,
             "trasferta": trasferta,
             "data": data_partita
@@ -295,7 +292,7 @@ def recupera_partite(league_id):
     )
 
     print(
-        f"Partite valide trovate: {len(partite)}",
+        f"✅ Partite trovate: {len(partite)}",
         flush=True
     )
 
