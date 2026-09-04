@@ -420,6 +420,66 @@ def formatta_pronostico(pronostico):
 
     return "\n".join(risultato)
 
+def recupera_partite_thesportsdb(league_id):
+    """Test recupero partite da TheSportsDB."""
+
+    # ID TheSportsDB della Serie A
+    thesportsdb_league_id = 4332
+
+    url = (
+        "https://www.thesportsdb.com/"
+        "api/v1/json/123/eventsseason.php"
+    )
+
+    params = {
+        "id": thesportsdb_league_id,
+        "s": "2026-2027"
+    }
+
+    print("==========================================", flush=True)
+    print("🧪 TEST THESPORTSDB", flush=True)
+    print(f"URL: {url}", flush=True)
+    print(f"Stagione: {params['s']}", flush=True)
+    print("==========================================", flush=True)
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30
+        )
+
+        print(
+            f"📡 Status HTTP: {response.status_code}",
+            flush=True
+        )
+
+        dati = response.json()
+
+        print(
+            f"📊 Eventi ricevuti: "
+            f"{len(dati.get('events') or [])}",
+            flush=True
+        )
+
+        print(
+            f"❌ Errore: {dati.get('error')}",
+            flush=True
+        )
+
+        return dati.get("events") or []
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore TheSportsDB: {e}",
+            flush=True
+        )
+
+        return []
+    
+
 
 # ============================================================
 # CREA REPORT
@@ -1032,3 +1092,9 @@ if __name__ == "__main__":
             "Arresto bot...",
             flush=True
         )
+        
+print(
+    f"🧪 RISULTATO TEST: "
+    f"{len(recupera_partite_thesportsdb(4332))} partite",
+    flush=True
+)
