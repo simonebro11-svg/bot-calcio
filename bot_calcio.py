@@ -569,27 +569,48 @@ def comando_testdb(message):
 # ============================================================
 
 def recupera_pronostico(fixture_id):
-    """Recupera il pronostico di API-Football."""
+    """
+    Genera un pronostico base per una partita.
 
-    dati = api_request(
-        "predictions",
-        {
-            "fixture": fixture_id
-        }
+    IMPORTANTE:
+    fixture_id è l'ID dell'evento TheSportsDB.
+
+    Questa versione non utilizza più API-Football.
+    """
+
+    print(
+        f"🔮 GENERAZIONE PRONOSTICO "
+        f"EVENTO THESPORTSDB: {fixture_id}",
+        flush=True
     )
 
-    if not dati:
-        return None
+    # Pronostico base temporaneo.
+    #
+    # In questa fase non abbiamo ancora le statistiche
+    # delle due squadre, quindi evitiamo di inventare
+    # percentuali o dati statistici.
+    #
+    # Il sistema definitivo verrà collegato alle statistiche
+    # delle squadre.
 
-    response = dati.get(
-        "response",
-        []
+    pronostico = {
+        "esito": "1X",
+        "over25": "OVER 1.5",
+        "gol": "DA VALUTARE",
+        "confidence": 50,
+        "motivazione": (
+            "Pronostico preliminare in attesa "
+            "delle statistiche delle squadre."
+        )
+    }
+
+    print(
+        f"✅ Pronostico generato: "
+        f"{pronostico['esito']}",
+        flush=True
     )
 
-    if not response:
-        return None
-
-    return response[0]
+    return pronostico
 
 
 # ============================================================
