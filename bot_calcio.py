@@ -20,15 +20,21 @@ API_URL = "https://v3.football.api-sports.io"
 
 
 # Controllo variabili ambiente
+print(
+    "DEBUG TELEGRAM_BOT_TOKEN:",
+    "PRESENTE" if TELEGRAM_BOT_TOKEN else "ASSENTE"
+)
+
+print(
+    "DEBUG FOOTBALL_API_KEY:",
+    "PRESENTE" if FOOTBALL_API_KEY else "ASSENTE"
+)
+
 if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError(
-        "ERRORE: TELEGRAM_BOT_TOKEN non configurato su Render."
-    )
+    raise RuntimeError("TELEGRAM_BOT_TOKEN non letto da Render.")
 
 if not FOOTBALL_API_KEY:
-    raise RuntimeError(
-        "ERRORE: FOOTBALL_API_KEY non configurata su Render."
-    )
+    raise RuntimeError("FOOTBALL_API_KEY non letto da Render.")
 
 
 # ============================================================
