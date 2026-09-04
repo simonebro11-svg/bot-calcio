@@ -153,23 +153,26 @@ def stagione_corrente():
 # RICHIESTA API-FOOTBALL
 # ============================================================
 
-def api_request(endpoint, params):
-    """Effettua una richiesta ad API-Football."""
+def api_request(endpoint, params=None):
+    url = f"{API_URL}/{endpoint}"
 
     headers = {
         "x-apisports-key": FOOTBALL_API_KEY
     }
 
-    url = f"{API_URL}/{endpoint}"
-
     try:
-
         response = requests.get(
             url,
             headers=headers,
             params=params,
             timeout=30
         )
+
+        print("========== API REQUEST ==========", flush=True)
+        print(f"URL: {url}", flush=True)
+        print(f"Status HTTP: {response.status_code}", flush=True)
+        print(f"Risposta API completa: {response.text}", flush=True)
+        print("=================================", flush=True)
 
         response.raise_for_status()
 
@@ -178,16 +181,7 @@ def api_request(endpoint, params):
     except requests.exceptions.RequestException as e:
 
         print(
-            f"Errore API-Football: {e}",
-            flush=True
-        )
-
-        return None
-
-    except ValueError as e:
-
-        print(
-            f"Errore risposta JSON: {e}",
+            f"❌ ERRORE RICHIESTA API: {e}",
             flush=True
         )
 
