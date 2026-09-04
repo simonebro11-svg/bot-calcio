@@ -194,44 +194,62 @@ def api_request(endpoint, params=None):
 
 def recupera_partite(league_id):
     """
-    Recupera più partite del campionato
-    utilizzando TheSportsDB.
+    Recupera le prossime partite del campionato.
+
+    Per la Serie A utilizza il calendario ESPN,
+    così possiamo ottenere più partite future.
     """
 
-    CAMPIONATI_THESPORTSDB = {
-        135: 4332,  # Serie A
-        39: 4328,   # Premier League
-        140: 4335,  # La Liga
-        78: 4331,   # Bundesliga
-        61: 4334    # Ligue 1
+    CAMPIONATI_ESPN = {
+        135: "ita.1",   # Serie A
+        39: "eng.1",    # Premier League
+        140: "esp.1",   # La Liga
+        78: "ger.1",    # Bundesliga
+        61: "fra.1"     # Ligue 1
     }
 
-    thesportsdb_league_id = CAMPIONATI_THESPORTSDB.get(league_id)
+    espn_league = CAMPIONATI_ESPN.get(league_id)
 
-    if not thesportsdb_league_id:
+    if not espn_league:
         print(
-            f"❌ Campionato non configurato: {league_id}",
+            f"❌ Campionato non configurato ESPN: {league_id}",
             flush=True
         )
         return []
 
+    # Data di oggi
+    oggi = datetime.now()
+
+    # Cerchiamo le partite nei prossimi 14 giorni
+    data_inizio = oggi.strftime("%Y%m%d")
+    data_fine = (
+        oggi + timedelta(days=14)
+    ).strftime("%Y%m%d")
+
     url = (
-        "https://www.thesportsdb.com/"
-        "api/v1/json/123/eventsseason.php"
+        "https://site.api.espn.com/"
+        "apis/site/v2/sports/soccer/"
+        f"{espn_league}/scoreboard"
     )
 
     params = {
-        "id": thesportsdb_league_id,
-        "s": "2026-2027"
+        "dates": f"{data_inizio}-{data_fine}"
     }
 
     print(
-        f"📡 TheSportsDB - recupero partite "
-        f"campionato ID {thesportsdb_league_id}",
+        f"📡 ESPN - recupero partite "
+        f"{espn_league}",
+        flush=True
+    )
+
+    print(
+        f"📅 Periodo: "
+        f"{data_inizio} - {data_fine}",
         flush=True
     )
 
     try:
+
         response = requests.get(
             url,
             params=params,
@@ -239,7 +257,8 @@ def recupera_partite(league_id):
         )
 
         print(
-            f"📡 Status HTTP: {response.status_code}",
+            f"📡 Status HTTP ESPN: "
+            f"{response.status_code}",
             flush=True
         )
 
@@ -250,62 +269,83 @@ def recupera_partite(league_id):
         eventi = dati.get("events") or []
 
         print(
-            f"📊 Eventi ricevuti da TheSportsDB: "
+            f"📊 Eventi ricevuti da ESPN: "
             f"{len(eventi)}",
             flush=True
         )
 
         if not eventi:
+
             print(
-                "❌ Nessun evento restituito da TheSportsDB.",
+                "❌ Nessuna partita trovata da ESPN.",
                 flush=True
             )
+
             return []
 
         partite = []
 
         for evento in eventi:
 
-            fixture_id = evento.get("idEvent")
-
-            casa = evento.get(
-                "strHomeTeam",
-                "Casa"
-            )
-
-            trasferta = evento.get(
-                "strAwayTeam",
-                "Trasferta"
-            )
+            fixture_id = evento.get("id")
 
             data_partita = evento.get(
-                "strTimestamp"
+                "date"
             )
 
-            if not data_partita:
-
-                data_evento = evento.get(
-                    "dateEvent"
-                )
-
-                ora_evento = evento.get(
-                    "strTimeLocal"
-                )
-
-                if data_evento:
-
-                    data_partita = data_evento
-
-                    if ora_evento:
-                        data_partita = (
-                            f"{data_evento}T"
-                            f"{ora_evento}"
-                        )
-
-            stato = evento.get(
-                "strStatus",
+            nome_partita = evento.get(
+                "name",
                 ""
             )
+
+            stato = (
+                evento
+                .get("status", {})
+                .get("type", {})
+                .get("name", "")
+            )
+
+            # Recuperiamo le squadre
+            competizioni = evento.get(
+                "competitions",
+                []
+            )
+
+            if not competizioni:
+                continue
+
+            competitors = competizioni[0].get(
+                "competitors",
+                []
+            )
+
+            if len(competitors) < 2:
+                continue
+
+            casa = "Casa"
+            trasferta = "Trasferta"
+
+            for squadra in competitors:
+
+                team = squadra.get(
+                    "team",
+                    {}
+                )
+
+                nome_team = team.get(
+                    "displayName",
+                    "Squadra"
+                )
+
+                home_away = squadra.get(
+                    "homeAway"
+                )
+
+                if home_away == "home":
+                    casa = nome_team
+
+                elif home_away == "away":
+                    trasferta = nome_team
 
             print(
                 f"📅 {data_partita} | "
@@ -318,11 +358,11 @@ def recupera_partite(league_id):
             if not fixture_id:
                 continue
 
-            # Ignora solamente partite chiaramente concluse
-            if str(stato).upper() in [
-                "FT",
-                "AET",
-                "PEN"
+            # Teniamo solamente partite non ancora concluse
+            if stato.upper() in [
+                "STATUS_FINAL",
+                "STATUS_FULL_TIME",
+                "STATUS_FINAL_PEN"
             ]:
                 continue
 
@@ -333,12 +373,12 @@ def recupera_partite(league_id):
                 "data": data_partita
             })
 
-        # Ordina cronologicamente
+        # Ordina per data
         partite.sort(
             key=lambda x: x.get("data") or ""
         )
 
-        # Elimina eventuali duplicati
+        # Elimina duplicati
         partite_uniche = []
         ids_visti = set()
 
@@ -355,8 +395,8 @@ def recupera_partite(league_id):
                 partita
             )
 
-        # Massimo 5 partite restituite
-        partite_uniche = partite_uniche[:5]
+        # Massimo 8 partite
+        partite_uniche = partite_uniche[:8]
 
         print(
             f"✅ Prossime partite trovate: "
@@ -369,7 +409,7 @@ def recupera_partite(league_id):
     except requests.exceptions.RequestException as e:
 
         print(
-            f"❌ Errore HTTP TheSportsDB: {e}",
+            f"❌ Errore HTTP ESPN: {e}",
             flush=True
         )
 
@@ -378,7 +418,7 @@ def recupera_partite(league_id):
     except ValueError as e:
 
         print(
-            f"❌ Errore JSON TheSportsDB: {e}",
+            f"❌ Errore JSON ESPN: {e}",
             flush=True
         )
 
@@ -387,7 +427,7 @@ def recupera_partite(league_id):
     except Exception as e:
 
         print(
-            f"❌ Errore recupero partite: {e}",
+            f"❌ Errore recupero partite ESPN: {e}",
             flush=True
         )
 
