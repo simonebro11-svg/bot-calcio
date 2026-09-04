@@ -888,48 +888,28 @@ def avvia_server():
 # ============================================================
 
 def configura_webhook():
-
-    print(
-        "Configurazione webhook Telegram...",
-        flush=True
-    )
-
     try:
+        print("Configurazione webhook Telegram...", flush=True)
 
-        risultato = bot.set_webhook(
-            url=WEBHOOK_URL
-        )
+        bot.set_webhook(url=WEBHOOK_URL)
 
-        print(
-            f"Webhook Telegram configurato: "
-            f"{risultato}",
-            flush=True
-        )
+        print(f"🌐 Server HTTP avviato sulla porta {PORT}", flush=True)
+        print(f"🔗 Webhook Telegram: {WEBHOOK_URL}", flush=True)
 
         info = bot.get_webhook_info()
 
-        print(
-            f"Webhook attivo: {info.url}",
-            flush=True
-        )
+        print("========== WEBHOOK TELEGRAM ==========", flush=True)
+        print(f"URL: {info.url}", flush=True)
+        print(f"Pending updates: {info.pending_update_count}", flush=True)
+        print(f"Ultimo errore: {info.last_error_message}", flush=True)
+        print(f"Data ultimo errore: {info.last_error_date}", flush=True)
+        print("======================================", flush=True)
 
-        if info.last_error_message:
-
-            print(
-                "⚠️ Ultimo errore webhook Telegram: "
-                f"{info.last_error_message}",
-                flush=True
-            )
+        return True
 
     except Exception as e:
-
-        print(
-            f"❌ Errore configurazione webhook: {e}",
-            flush=True
-        )
-
-        raise
-
+        print(f"❌ Errore configurazione webhook: {e}", flush=True)
+        return False
 
 # ============================================================
 # AVVIO PRINCIPALE
