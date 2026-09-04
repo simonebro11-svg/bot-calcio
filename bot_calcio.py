@@ -889,26 +889,41 @@ def avvia_server():
 
 def configura_webhook():
     try:
-        print("Configurazione webhook Telegram...", flush=True)
+        print("==========================================", flush=True)
+        print("CONFIGURAZIONE TELEGRAM", flush=True)
 
-        bot.set_webhook(url=WEBHOOK_URL)
+        # Controlla quale bot stiamo utilizzando
+        me = bot.get_me()
 
-        print(f"🌐 Server HTTP avviato sulla porta {PORT}", flush=True)
-        print(f"🔗 Webhook Telegram: {WEBHOOK_URL}", flush=True)
+        print(f"🤖 BOT TELEGRAM: @{me.username}", flush=True)
+        print(f"🆔 BOT ID: {me.id}", flush=True)
 
+        # Imposta il webhook
+        risultato = bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=["message"]
+        )
+
+        print(f"Webhook impostato: {risultato}", flush=True)
+        print(f"URL webhook: {WEBHOOK_URL}", flush=True)
+
+        # Legge lo stato reale dal server Telegram
         info = bot.get_webhook_info()
 
-        print("========== WEBHOOK TELEGRAM ==========", flush=True)
+        print("========== STATO WEBHOOK ==========", flush=True)
         print(f"URL: {info.url}", flush=True)
         print(f"Pending updates: {info.pending_update_count}", flush=True)
         print(f"Ultimo errore: {info.last_error_message}", flush=True)
         print(f"Data ultimo errore: {info.last_error_date}", flush=True)
-        print("======================================", flush=True)
+        print(f"IP Telegram: {info.ip_address}", flush=True)
+        print(f"Max connessioni: {info.max_connections}", flush=True)
+        print(f"Allowed updates: {info.allowed_updates}", flush=True)
+        print("====================================", flush=True)
 
         return True
 
     except Exception as e:
-        print(f"❌ Errore configurazione webhook: {e}", flush=True)
+        print(f"❌ ERRORE TELEGRAM: {e}", flush=True)
         return False
 
 # ============================================================
