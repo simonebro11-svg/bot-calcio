@@ -194,17 +194,16 @@ def api_request(endpoint, params=None):
 
 def recupera_partite(league_id):
     """
-    Recupera le prossime partite da TheSportsDB
-    per la stagione 2026-2027.
+    Recupera le prossime partite del campionato
+    utilizzando TheSportsDB.
     """
 
-    # ID dei campionati su TheSportsDB
     CAMPIONATI_THESPORTSDB = {
         135: 4332,  # Serie A
-        39:  4328,  # Premier League
+        39: 4328,   # Premier League
         140: 4335,  # La Liga
-        78:  4331,  # Bundesliga
-        61:  4334   # Ligue 1
+        78: 4331,   # Bundesliga
+        61: 4334    # Ligue 1
     }
 
     thesportsdb_league_id = CAMPIONATI_THESPORTSDB.get(
@@ -214,8 +213,7 @@ def recupera_partite(league_id):
     if not thesportsdb_league_id:
 
         print(
-            f"❌ Campionato non configurato su TheSportsDB: "
-            f"{league_id}",
+            f"❌ Campionato non configurato: {league_id}",
             flush=True
         )
 
@@ -223,26 +221,21 @@ def recupera_partite(league_id):
 
     url = (
         "https://www.thesportsdb.com/"
-        "api/v1/json/123/eventsseason.php"
+        "api/v1/json/123/eventsnextleague.php"
     )
 
     params = {
-        "id": thesportsdb_league_id,
-        "s": "2026-2027"
+        "id": thesportsdb_league_id
     }
 
     print("==========================================", flush=True)
-    print("⚽ RICERCA PARTITE THESPORTSDB", flush=True)
+    print("⚽ RICERCA PROSSIME PARTITE", flush=True)
     print(
         f"League ID API-Football: {league_id}",
         flush=True
     )
     print(
         f"League ID TheSportsDB: {thesportsdb_league_id}",
-        flush=True
-    )
-    print(
-        "Stagione: 2026-2027",
         flush=True
     )
     print("==========================================", flush=True)
@@ -274,7 +267,7 @@ def recupera_partite(league_id):
         if not eventi:
 
             print(
-                "❌ TheSportsDB non ha restituito eventi.",
+                "❌ Nessuna prossima partita trovata.",
                 flush=True
             )
 
@@ -284,8 +277,6 @@ def recupera_partite(league_id):
             )
 
             return []
-
-        oggi = datetime.now().date()
 
         partite = []
 
@@ -327,7 +318,7 @@ def recupera_partite(league_id):
                             f"{data_evento}T{ora_evento}"
                         )
 
-            status = evento.get(
+            stato = evento.get(
                 "strStatus"
             )
 
@@ -335,35 +326,11 @@ def recupera_partite(league_id):
                 f"📅 {data_partita} | "
                 f"{casa} - {trasferta} | "
                 f"ID: {fixture_id} | "
-                f"Stato: {status}",
+                f"Stato: {stato}",
                 flush=True
             )
 
             if not fixture_id:
-
-                continue
-
-            # Prova a ricavare la data per filtrare
-            # le partite già passate.
-            data_stringa = (
-                data_partita[:10]
-                if data_partita
-                else ""
-            )
-
-            try:
-
-                data_evento = datetime.strptime(
-                    data_stringa,
-                    "%Y-%m-%d"
-                ).date()
-
-            except Exception:
-
-                data_evento = None
-
-            # Ignora le partite già giocate
-            if data_evento and data_evento < oggi:
 
                 continue
 
@@ -379,7 +346,7 @@ def recupera_partite(league_id):
         )
 
         print(
-            f"✅ Partite future trovate: "
+            f"✅ Prossime partite trovate: "
             f"{len(partite)}",
             flush=True
         )
@@ -412,7 +379,6 @@ def recupera_partite(league_id):
         )
 
         return []
-
 def recupera_partite_thesportsdb(league_id):
     """
     Recupera le prossime partite da TheSportsDB.
