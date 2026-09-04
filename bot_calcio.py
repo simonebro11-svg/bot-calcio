@@ -1,3 +1,4 @@
+```python
 import os
 import threading
 import http.server
@@ -16,9 +17,7 @@ SECRET_FILE = "/etc/secrets/bot_secrets.env"
 
 
 def carica_secret_file():
-    """
-    Legge le credenziali dal Secret File di Render.
-    """
+    """Legge le credenziali dal Secret File di Render."""
 
     if not os.path.exists(SECRET_FILE):
         print("ATTENZIONE: Secret File non trovato.", flush=True)
@@ -65,17 +64,22 @@ FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY")
 
 PORT = int(os.getenv("PORT", "10000"))
 
-# URL pubblico fornito da Render
+
+# ============================================================
+# URL RENDER
+# ============================================================
+
 RENDER_EXTERNAL_URL = os.getenv(
     "RENDER_EXTERNAL_URL",
     "https://bot-pronostici-gratis.onrender.com"
 )
 
-# Endpoint webhook Telegram
+RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
+
 WEBHOOK_PATH = "/telegram/webhook"
 
 WEBHOOK_URL = (
-    RENDER_EXTERNAL_URL.rstrip("/")
+    RENDER_EXTERNAL_URL
     + WEBHOOK_PATH
 )
 
@@ -102,7 +106,6 @@ if not FOOTBALL_API_KEY:
     )
 
 
-# Non stampiamo mai le chiavi nei log
 print("TELEGRAM_BOT_TOKEN: OK", flush=True)
 print("FOOTBALL_API_KEY: OK", flush=True)
 
@@ -111,7 +114,9 @@ print("FOOTBALL_API_KEY: OK", flush=True)
 # TELEGRAM BOT
 # ============================================================
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+bot = telebot.TeleBot(
+    TELEGRAM_BOT_TOKEN
+)
 
 
 # ============================================================
@@ -135,10 +140,6 @@ def stagione_corrente():
     """
     API-Football identifica la stagione con l'anno
     in cui inizia il campionato.
-
-    Esempio:
-    settembre 2026 -> stagione 2026
-    gennaio 2027 -> stagione 2026
     """
 
     oggi = datetime.now()
@@ -154,9 +155,7 @@ def stagione_corrente():
 # ============================================================
 
 def api_request(endpoint, params):
-    """
-    Effettua una richiesta ad API-Football.
-    """
+    """Effettua una richiesta ad API-Football."""
 
     headers = {
         "x-apisports-key": FOOTBALL_API_KEY
@@ -201,9 +200,7 @@ def api_request(endpoint, params):
 # ============================================================
 
 def recupera_partite(league_id):
-    """
-    Recupera le partite dei prossimi 14 giorni.
-    """
+    """Recupera le partite dei prossimi 14 giorni."""
 
     oggi = datetime.now().date()
 
@@ -231,8 +228,15 @@ def recupera_partite(league_id):
 
     for item in dati.get("response", []):
 
-        fixture = item.get("fixture", {})
-        teams = item.get("teams", {})
+        fixture = item.get(
+            "fixture",
+            {}
+        )
+
+        teams = item.get(
+            "teams",
+            {}
+        )
 
         status = fixture.get(
             "status",
@@ -259,7 +263,9 @@ def recupera_partite(league_id):
             "Trasferta"
         )
 
-        data_partita = fixture.get("date")
+        data_partita = fixture.get(
+            "date"
+        )
 
         partite.append({
             "id": fixture.get("id"),
@@ -268,7 +274,6 @@ def recupera_partite(league_id):
             "data": data_partita
         })
 
-    # Ordina per data
     partite.sort(
         key=lambda x: x.get("data") or ""
     )
@@ -281,9 +286,7 @@ def recupera_partite(league_id):
 # ============================================================
 
 def recupera_pronostico(fixture_id):
-    """
-    Recupera il pronostico di API-Football.
-    """
+    """Recupera il pronostico di API-Football."""
 
     dati = api_request(
         "predictions",
@@ -311,9 +314,7 @@ def recupera_pronostico(fixture_id):
 # ============================================================
 
 def formatta_data(data_string):
-    """
-    Converte la data API in formato italiano.
-    """
+    """Converte la data API in formato italiano."""
 
     if not data_string:
         return "Data non disponibile"
@@ -341,9 +342,7 @@ def formatta_data(data_string):
 # ============================================================
 
 def formatta_pronostico(pronostico):
-    """
-    Estrae le informazioni principali dal pronostico.
-    """
+    """Estrae le informazioni principali dal pronostico."""
 
     if not pronostico:
 
@@ -412,7 +411,7 @@ def formatta_pronostico(pronostico):
 
 
 # ============================================================
-# COSTRUISCE REPORT
+# CREA REPORT
 # ============================================================
 
 def crea_report(nome_campionato, league_id):
@@ -445,7 +444,6 @@ def crea_report(nome_campionato, league_id):
         ""
     ]
 
-    # Massimo 8 partite
     for partita in partite[:8]:
 
         fixture_id = partita["id"]
@@ -490,6 +488,12 @@ def crea_report(nome_campionato, league_id):
     commands=["start"]
 )
 def comando_start(message):
+
+    print(
+        f"📩 Comando /start ricevuto da chat "
+        f"{message.chat.id}",
+        flush=True
+    )
 
     testo = (
         "⚽ <b>BOT PRONOSTICI CALCIO</b>\n\n"
@@ -562,7 +566,7 @@ def comando_campionati(message):
 
 
 # ============================================================
-# GESTIONE CAMPIONATI
+# GESTIONE MESSAGGI
 # ============================================================
 
 @bot.message_handler(
@@ -609,7 +613,6 @@ def gestione_messaggio(message):
 
         return
 
-    # Messaggio temporaneo
     messaggio_attesa = bot.send_message(
         message.chat.id,
         f"⏳ Sto analizzando "
@@ -625,7 +628,6 @@ def gestione_messaggio(message):
             league_id
         )
 
-        # Limite Telegram
         if len(report) > 4000:
 
             report = (
@@ -639,7 +641,6 @@ def gestione_messaggio(message):
             parse_mode="HTML"
         )
 
-        # Cancella messaggio di attesa
         try:
 
             bot.delete_message(
@@ -666,19 +667,28 @@ def gestione_messaggio(message):
 
 
 # ============================================================
-# SERVER HTTP PER RENDER + WEBHOOK TELEGRAM
+# SERVER HTTP RENDER + WEBHOOK TELEGRAM
 # ============================================================
 
 class HealthHandler(
     http.server.BaseHTTPRequestHandler
 ):
 
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
+
     def do_GET(self):
+
+        print(
+            f"🌐 GET ricevuta: {self.path}",
+            flush=True
+        )
 
         self.send_response(200)
 
         self.send_header(
-            "Content-type",
+            "Content-Type",
             "text/plain; charset=utf-8"
         )
 
@@ -688,22 +698,22 @@ class HealthHandler(
             b"Bot pronostici calcio online!"
         )
 
-        def do_POST(self):
+    # --------------------------------------------------------
+    # POST WEBHOOK
+    # --------------------------------------------------------
+
+    def do_POST(self):
 
         print(
-            f"📩 RICHIESTA POST RICEVUTA - PATH: {self.path}",
-            flush=True
-        )
-
-        print(
-            f"📩 Content-Type: {self.headers.get('Content-Type')}",
+            f"📩 POST RICEVUTA: {self.path}",
             flush=True
         )
 
         if self.path != WEBHOOK_PATH:
 
             print(
-                f"❌ PATH NON CORRETTO: {self.path}",
+                f"❌ Percorso webhook non corretto: "
+                f"{self.path}",
                 flush=True
             )
 
@@ -717,12 +727,13 @@ class HealthHandler(
             content_length = int(
                 self.headers.get(
                     "Content-Length",
-                    0
+                    "0"
                 )
             )
 
             print(
-                f"📩 Content-Length: {content_length}",
+                f"📩 Dimensione richiesta: "
+                f"{content_length} byte",
                 flush=True
             )
 
@@ -735,8 +746,13 @@ class HealthHandler(
                 flush=True
             )
 
-            update = telebot.types.Update.de_json(
+            data = json.loads(
                 body.decode("utf-8")
+            )
+
+            update = (
+                telebot.types.Update
+                .de_json(data)
             )
 
             print(
@@ -744,7 +760,7 @@ class HealthHandler(
                 flush=True
             )
 
-            # Rispondiamo subito a Telegram
+            # Rispondi subito a Telegram
             self.send_response(200)
 
             self.send_header(
@@ -758,13 +774,17 @@ class HealthHandler(
                 b"OK"
             )
 
-            # Elaboriamo l'update
-            bot.process_new_updates(
-                [update]
+            # Elaborazione in background
+            thread = threading.Thread(
+                target=elabora_update,
+                args=(update,),
+                daemon=True
             )
 
+            thread.start()
+
             print(
-                "✅ Update Telegram elaborato.",
+                "✅ Update inviato al thread di elaborazione.",
                 flush=True
             )
 
@@ -778,79 +798,25 @@ class HealthHandler(
             try:
 
                 self.send_response(200)
+
+                self.send_header(
+                    "Content-Type",
+                    "text/plain; charset=utf-8"
+                )
+
                 self.end_headers()
+
+                self.wfile.write(
+                    b"ERROR"
+                )
 
             except Exception:
 
                 pass
 
-            self.send_response(404)
-            self.end_headers()
-
-            return
-
-        try:
-
-            content_length = int(
-                self.headers.get(
-                    "Content-Length",
-                    0
-                )
-            )
-
-            body = self.rfile.read(
-                content_length
-            )
-
-            data = json.loads(
-                body.decode("utf-8")
-            )
-
-            update = (
-                telebot.types.Update
-                .de_json(data)
-            )
-
-            if update:
-
-                bot.process_new_updates(
-                    [update]
-                )
-
-            self.send_response(200)
-
-            self.send_header(
-                "Content-type",
-                "text/plain"
-            )
-
-            self.end_headers()
-
-            self.wfile.write(
-                b"OK"
-            )
-
-        except Exception as e:
-
-            print(
-                f"Errore webhook Telegram: {e}",
-                flush=True
-            )
-
-            # Restituiamo comunque 200
-            # per evitare retry inutili
-            self.send_response(200)
-
-            self.send_header(
-                "Content-type",
-                "text/plain"
-            )
-
-            self.end_headers()
-
-            self.wfile.write(
-                b"ERROR"
-            )
+    # --------------------------------------------------------
+    # LOG HTTP
+    # --------------------------------------------------------
 
     def log_message(
         self,
@@ -858,28 +824,60 @@ class HealthHandler(
         *args
     ):
 
-        # Evita log HTTP inutili
         return
 
 
 # ============================================================
-# AVVIO SERVER
+# ELABORA UPDATE TELEGRAM
+# ============================================================
+
+def elabora_update(update):
+
+    try:
+
+        print(
+            "⚙️ Elaborazione update Telegram...",
+            flush=True
+        )
+
+        bot.process_new_updates(
+            [update]
+        )
+
+        print(
+            "✅ Update Telegram elaborato.",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore elaborazione update: {e}",
+            flush=True
+        )
+
+
+# ============================================================
+# AVVIO SERVER HTTP
 # ============================================================
 
 def avvia_server():
 
     server = http.server.ThreadingHTTPServer(
-        ("0.0.0.0", PORT),
+        (
+            "0.0.0.0",
+            PORT
+        ),
         HealthHandler
     )
 
     print(
-        f"Server HTTP avviato sulla porta {PORT}",
+        f"🌐 Server HTTP avviato sulla porta {PORT}",
         flush=True
     )
 
     print(
-        f"Webhook Telegram: {WEBHOOK_URL}",
+        f"🔗 Webhook Telegram: {WEBHOOK_URL}",
         flush=True
     )
 
@@ -887,7 +885,7 @@ def avvia_server():
 
 
 # ============================================================
-# CONFIGURAZIONE WEBHOOK TELEGRAM
+# CONFIGURA WEBHOOK TELEGRAM
 # ============================================================
 
 def configura_webhook():
@@ -899,19 +897,16 @@ def configura_webhook():
 
     try:
 
-        # Imposta il webhook.
-        # Telegram sostituirà automaticamente
-        # un eventuale webhook precedente.
         risultato = bot.set_webhook(
             url=WEBHOOK_URL
         )
 
         print(
-            f"Webhook Telegram configurato: {risultato}",
+            f"Webhook Telegram configurato: "
+            f"{risultato}",
             flush=True
         )
 
-        # Verifica configurazione
         info = bot.get_webhook_info()
 
         print(
@@ -922,7 +917,7 @@ def configura_webhook():
         if info.last_error_message:
 
             print(
-                "Ultimo errore webhook Telegram: "
+                "⚠️ Ultimo errore webhook Telegram: "
                 f"{info.last_error_message}",
                 flush=True
             )
@@ -930,7 +925,7 @@ def configura_webhook():
     except Exception as e:
 
         print(
-            f"Errore configurazione webhook: {e}",
+            f"❌ Errore configurazione webhook: {e}",
             flush=True
         )
 
@@ -949,7 +944,7 @@ if __name__ == "__main__":
     )
 
     print(
-        "BOT PRONOSTICI CALCIO",
+        "⚽ BOT PRONOSTICI CALCIO",
         flush=True
     )
 
@@ -964,7 +959,7 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # AVVIA SERVER HTTP
+    # SERVER HTTP
     # --------------------------------------------------------
 
     thread_server = threading.Thread(
@@ -980,7 +975,7 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # CONFIGURA WEBHOOK
+    # WEBHOOK TELEGRAM
     # --------------------------------------------------------
 
     configura_webhook()
@@ -991,18 +986,28 @@ if __name__ == "__main__":
     )
 
     print(
-        "BOT ONLINE!",
+        "==========================================",
         flush=True
     )
 
-    # Mantiene vivo il processo principale
-    # senza usare getUpdates / infinity_polling.
+    print(
+        "✅ BOT ONLINE!",
+        flush=True
+    )
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+    # --------------------------------------------------------
+    # MANTIENE VIVO IL PROCESSO
+    # --------------------------------------------------------
+
     try:
 
         while True:
 
-            # Il server HTTP gira nel thread
-            # principale secondario.
             threading.Event().wait(3600)
 
     except KeyboardInterrupt:
@@ -1011,3 +1016,4 @@ if __name__ == "__main__":
             "Arresto bot...",
             flush=True
         )
+```
