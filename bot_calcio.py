@@ -468,64 +468,610 @@ def comando_testdb(message):
         parse_mode="HTML"
     )
 
-# ============================================================
-# RECUPERA PRONOSTICO
-# ============================================================
+def recupera_form_squadra(nome_squadra, giorni=60):
+    """
+    Recupera i risultati recenti di una squadra
+    tramite ESPN e calcola il rendimento.
+    """
 
+    oggi = datetime.now()
+
+    data_inizio = (
+        oggi - timedelta(days=giorni)
+    ).strftime("%Y%m%d")
+
+    data_fine = oggi.strftime("%Y%m%d")
+
+    url = (
+        "https://site.api.espn.com/"
+        "apis/site/v2/sports/soccer/"
+        "ita.1/scoreboard"
+    )
+
+    params = {
+        "dates": f"{data_inizio}-{data_fine}"
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        dati = response.json()
+
+        eventi = dati.get("events") or []
+
+        risultati = []
+
+        for evento in eventi:
+
+            competizioni = evento.get(
+                "competitions",
+                []
+            )
+
+            if not competizioni:
+                continue
+
+            competitors = competizioni[0].get(
+                "competitors",
+                []
+            )
+
+            if len(competitors) != 2:
+                continue
+
+            squadra_trovata = False
+            squadra = None
+            avversaria = None
+
+            for c in competitors:
+
+                team = c.get("team", {})
+                nome = team.get(
+                    "displayName",
+                    ""
+                )
+
+                if nome.lower() == nome_squadra.lower():
+
+                    squadra = c
+                    squadra_trovata = True
+
+                else:
+
+                    avversaria = c
+
+            if not squadra_trovata:
+                continue
+
+            stato = (
+                evento
+                .get("status", {})
+                .get("type", {})
+                .get("name", "")
+            )
+
+            if stato not in [
+                "STATUS_FINAL",
+                "STATUS_FINAL_PEN",
+                "STATUS_FULL_TIME"
+            ]:
+                continue
+
+            try:
+
+                gol_squadra = int(
+                    squadra.get("score", 0)
+                )
+
+                gol_avversaria = int(
+                    avversaria.get("score", 0)
+                )
+
+            except Exception:
+
+                continue
+
+            casa_trasferta = squadra.get(
+                "homeAway"
+            )
+
+            if gol_squadra > gol_avversaria:
+                risultato = "V"
+
+            elif gol_squadra == gol_avversaria:
+                risultato = "N"
+
+            else:
+                risultato = "P"
+
+            risultati.append({
+                "risultato": risultato,
+                "gol_fatti": gol_squadra,
+                "gol_subiti": gol_avversaria,
+                "casa": casa_trasferta == "home",
+                "data": evento.get("date", "")
+            })
+
+        risultati.sort(
+            key=lambda x: x.get("data", ""),
+            reverse=True
+        )
+
+        return risultati[:10]
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Errore form {nome_squadra}: {e}",
+            flush=True
+        )
+
+        return []
+
+
+def calcola_statistiche_squadra(
+    nome_squadra,
+    partite
+):
+    """
+    Calcola le statistiche recenti
+    della squadra.
+    """
+
+    if not partite:
+        return {
+            "partite": 0,
+            "vittorie": 0,
+            "pareggi": 0,
+            "sconfitte": 0,
+            "gol_fatti": 0,
+            "gol_subiti": 0,
+            "media_gol_fatti": 0,
+            "media_gol_subiti": 0,
+            "punti_media": 0,
+            "forma": ""
+        }
+
+    vittorie = sum(
+        1 for p in partite
+        if p["risultato"] == "V"
+    )
+
+    pareggi = sum(
+        1 for p in partite
+        if p["risultato"] == "N"
+    )
+
+    sconfitte = sum(
+        1 for p in partite
+        if p["risultato"] == "P"
+    )
+
+    gol_fatti = sum(
+        p["gol_fatti"]
+        for p in partite
+    )
+
+    gol_subiti = sum(
+        p["gol_subiti"]
+        for p in partite
+    )
+
+    numero_partite = len(partite)
+
+    media_gol_fatti = (
+        gol_fatti / numero_partite
+    )
+
+    media_gol_subiti = (
+        gol_subiti / numero_partite
+    )
+
+    punti = (
+        vittorie * 3
+        + pareggi
+    )
+
+    punti_media = (
+        punti / numero_partite
+    )
+
+    forma = "".join(
+        p["risultato"]
+        for p in partite[:5]
+    )
+
+    return {
+        "partite": numero_partite,
+        "vittorie": vittorie,
+        "pareggi": pareggi,
+        "sconfitte": sconfitte,
+        "gol_fatti": gol_fatti,
+        "gol_subiti": gol_subiti,
+        "media_gol_fatti": media_gol_fatti,
+        "media_gol_subiti": media_gol_subiti,
+        "punti_media": punti_media,
+        "forma": forma
+    }
+
+
+def genera_pronostico_statistico(
+    casa,
+    trasferta
+):
+    """
+    Genera un pronostico statistico
+    basato sulla forma recente delle due squadre.
+    """
+
+    print(
+        f"📊 Analisi statistica: "
+        f"{casa} - {trasferta}",
+        flush=True
+    )
+
+    form_casa = recupera_form_squadra(casa)
+    form_trasferta = recupera_form_squadra(
+        trasferta
+    )
+
+    stats_casa = calcola_statistiche_squadra(
+        casa,
+        form_casa
+    )
+
+    stats_trasferta = calcola_statistiche_squadra(
+        trasferta,
+        form_trasferta
+    )
+
+    print(
+        f"🏠 {casa}: "
+        f"{stats_casa['forma']} | "
+        f"GF {stats_casa['media_gol_fatti']:.2f} | "
+        f"GS {stats_casa['media_gol_subiti']:.2f}",
+        flush=True
+    )
+
+    print(
+        f"✈️ {trasferta}: "
+        f"{stats_trasferta['forma']} | "
+        f"GF {stats_trasferta['media_gol_fatti']:.2f} | "
+        f"GS {stats_trasferta['media_gol_subiti']:.2f}",
+        flush=True
+    )
+
+    # Se non abbiamo dati sufficienti
+    if (
+        stats_casa["partite"] == 0
+        or stats_trasferta["partite"] == 0
+    ):
+
+        return {
+            "esito": "N/D",
+            "over25": "N/D",
+            "gol": "N/D",
+            "confidence": 0,
+            "motivazione": (
+                "Dati statistici insufficienti "
+                "per elaborare il pronostico."
+            )
+        }
+
+    # Punteggio di forza
+    forza_casa = (
+        stats_casa["punti_media"] * 10
+        + stats_casa["media_gol_fatti"] * 3
+        - stats_casa["media_gol_subiti"] * 2
+    )
+
+    forza_trasferta = (
+        stats_trasferta["punti_media"] * 10
+        + stats_trasferta["media_gol_fatti"] * 3
+        - stats_trasferta["media_gol_subiti"] * 2
+    )
+
+    # Bonus per il fattore campo
+    forza_casa += 2
+
+    differenza = (
+        forza_casa - forza_trasferta
+    )
+
+    # -----------------------------
+    # ESITO
+    # -----------------------------
+
+    if differenza >= 3:
+
+        esito = "1"
+
+    elif differenza >= 1:
+
+        esito = "1X"
+
+    elif differenza <= -3:
+
+        esito = "2"
+
+    elif differenza <= -1:
+
+        esito = "X2"
+
+    else:
+
+        esito = "X"
+
+    # -----------------------------
+    # OVER / UNDER
+    # -----------------------------
+
+    media_gol_totale = (
+        stats_casa["media_gol_fatti"]
+        + stats_casa["media_gol_subiti"]
+        + stats_trasferta["media_gol_fatti"]
+        + stats_trasferta["media_gol_subiti"]
+    ) / 2
+
+    if media_gol_totale >= 2.7:
+
+        over25 = "OVER 2.5"
+
+    elif media_gol_totale >= 2.2:
+
+        over25 = "OVER 1.5"
+
+    else:
+
+        over25 = "UNDER 2.5"
+
+    # -----------------------------
+    # GOL / NO GOL
+    # -----------------------------
+
+    media_casa = (
+        stats_casa["media_gol_fatti"]
+    )
+
+    media_trasferta = (
+        stats_trasferta["media_gol_fatti"]
+    )
+
+    if (
+        media_casa >= 1.1
+        and media_trasferta >= 1.0
+    ):
+
+        gol = "GOL"
+
+    else:
+
+        gol = "NO GOL"
+
+    # -----------------------------
+    # AFFIDABILITÀ
+    # -----------------------------
+
+    confidence = 50
+
+    if abs(differenza) >= 3:
+        confidence += 15
+
+    elif abs(differenza) >= 1.5:
+        confidence += 10
+
+    if media_gol_totale >= 2.5:
+        confidence += 5
+
+    if (
+        stats_casa["partite"] >= 5
+        and stats_trasferta["partite"] >= 5
+    ):
+        confidence += 5
+
+    confidence = min(
+        confidence,
+        85
+    )
+
+    # -----------------------------
+    # MOTIVAZIONE
+    # -----------------------------
+
+    motivazione = (
+        f"{casa} nelle ultime "
+        f"{stats_casa['partite']} partite: "
+        f"{stats_casa['vittorie']} vittorie, "
+        f"{stats_casa['pareggi']} pareggi, "
+        f"{stats_casa['sconfitte']} sconfitte. "
+        f"Media gol fatti "
+        f"{stats_casa['media_gol_fatti']:.2f}. "
+        f"{trasferta} nelle ultime "
+        f"{stats_trasferta['partite']} partite: "
+        f"{stats_trasferta['vittorie']} vittorie, "
+        f"{stats_trasferta['pareggi']} pareggi, "
+        f"{stats_trasferta['sconfitte']} sconfitte. "
+        f"Media gol fatti "
+        f"{stats_trasferta['media_gol_fatti']:.2f}."
+    )
+
+    return {
+        "esito": esito,
+        "over25": over25,
+        "gol": gol,
+        "confidence": confidence,
+        "motivazione": motivazione
+    }
+    
 # ============================================================
 # RECUPERA PRONOSTICO
 # ============================================================
 
 def recupera_pronostico(fixture_id):
     """
-    Genera il pronostico per una partita TheSportsDB.
-
-    NOTA:
-    fixture_id è l'ID dell'evento TheSportsDB.
-
-    Questa versione NON utilizza API-Football.
+    Recupera il pronostico statistico
+    della partita ESPN.
     """
 
     print(
         f"🔮 GENERAZIONE PRONOSTICO "
-        f"EVENTO THESPORTSDB: {fixture_id}",
+        f"EVENTO ESPN: {fixture_id}",
         flush=True
     )
 
-    pronostico = {
-        "esito": "1X",
-        "over25": "OVER 1.5",
-        "gol": "DA VALUTARE",
-        "confidence": 50,
-        "motivazione": (
-            "Pronostico preliminare. "
-            "Analisi statistica dettagliata "
-            "non ancora disponibile."
-        )
+    # Recuperiamo i dati dell'evento
+    url = (
+        "https://site.api.espn.com/"
+        "apis/site/v2/sports/soccer/"
+        "ita.1/summary"
+    )
+
+    params = {
+        "event": fixture_id
     }
 
-    print(
-        f"✅ Esito: {pronostico['esito']}",
-        flush=True
-    )
+    try:
 
-    print(
-        f"📈 Over/Under: {pronostico['over25']}",
-        flush=True
-    )
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30
+        )
 
-    print(
-        f"⚽ Gol/No Gol: {pronostico['gol']}",
-        flush=True
-    )
+        response.raise_for_status()
 
-    print(
-        f"🎯 Affidabilità: "
-        f"{pronostico['confidence']}%",
-        flush=True
-    )
+        dati = response.json()
 
-    return pronostico
+        evento = dati.get("header", {})
+
+        competizioni = evento.get(
+            "competitions",
+            []
+        )
+
+        if not competizioni:
+
+            print(
+                "❌ Nessuna competizione "
+                "trovata per l'evento.",
+                flush=True
+            )
+
+            return None
+
+        competitors = competizioni[0].get(
+            "competitors",
+            []
+        )
+
+        if len(competitors) < 2:
+
+            return None
+
+        casa = None
+        trasferta = None
+
+        for squadra in competitors:
+
+            team = squadra.get(
+                "team",
+                {}
+            )
+
+            nome = team.get(
+                "displayName"
+            )
+
+            if squadra.get("homeAway") == "home":
+                casa = nome
+
+            elif squadra.get("homeAway") == "away":
+                trasferta = nome
+
+        if not casa or not trasferta:
+
+            print(
+                "❌ Impossibile identificare "
+                "le squadre.",
+                flush=True
+            )
+
+            return None
+
+        print(
+            f"🏠 CASA: {casa}",
+            flush=True
+        )
+
+        print(
+            f"✈️ TRASFERTA: {trasferta}",
+            flush=True
+        )
+
+        pronostico = genera_pronostico_statistico(
+            casa,
+            trasferta
+        )
+
+        print(
+            f"✅ Esito: "
+            f"{pronostico.get('esito')}",
+            flush=True
+        )
+
+        print(
+            f"📈 Over/Under: "
+            f"{pronostico.get('over25')}",
+            flush=True
+        )
+
+        print(
+            f"⚽ Gol/No Gol: "
+            f"{pronostico.get('gol')}",
+            flush=True
+        )
+
+        print(
+            f"🎯 Affidabilità: "
+            f"{pronostico.get('confidence')}%",
+            flush=True
+        )
+
+        return pronostico
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"❌ Errore HTTP ESPN pronostico: {e}",
+            flush=True
+        )
+
+        return None
+
+    except ValueError as e:
+
+        print(
+            f"❌ Errore JSON ESPN pronostico: {e}",
+            flush=True
+        )
+
+        return None
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore pronostico: {e}",
+            flush=True
+        )
+
+        return None
 
 
 # ============================================================
