@@ -223,13 +223,10 @@ def espn_get(url, params=None, cache_key=None):
 
     try:
         response = requests.get(
-            url,
-            params=params,
-            timeout=HTTP_TIMEOUT,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
-        )
+    url,
+    params=params,
+    timeout=HTTP_TIMEOUT
+)
 
         if response.status_code != 200:
             print(
