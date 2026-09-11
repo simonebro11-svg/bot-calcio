@@ -18,6 +18,10 @@ import telebot
 SECRET_FILE = "/etc/secrets/bot_secrets.env"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+print("DEBUG TOKEN: lunghezza =", len(TELEGRAM_BOT_TOKEN))
+print("DEBUG TOKEN: numero di ':' =", TELEGRAM_BOT_TOKEN.count(":"))
+print("DEBUG TOKEN: inizio =", TELEGRAM_BOT_TOKEN[:5])
+print("DEBUG TOKEN: fine =", TELEGRAM_BOT_TOKEN[-5:])
 FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
 
 RENDER_PORT = int(os.getenv("PORT", "10000"))
