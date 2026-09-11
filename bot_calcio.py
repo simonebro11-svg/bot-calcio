@@ -3,7 +3,7 @@ import json
 import time
 import threading
 import http.server
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import requests
 import telebot
@@ -17,16 +17,14 @@ SECRET_FILE = "/etc/secrets/bot_secrets.env"
 
 
 def carica_secret_file():
-    """
-    Legge le credenziali dal Secret File di Render.
-    Se una variabile esiste già nell'ambiente, non viene sovrascritta.
-    """
 
     if not os.path.exists(SECRET_FILE):
+
         print(
             "⚠️ Secret File non trovato.",
             flush=True
         )
+
         return
 
     try:
@@ -57,6 +55,7 @@ def carica_secret_file():
                 value = value.strip()
 
                 if not os.getenv(key):
+
                     os.environ[key] = value
 
         print(
@@ -215,6 +214,7 @@ def cache_get(chiave):
         elemento = CACHE.get(chiave)
 
         if not elemento:
+
             return None
 
         timestamp, valore = elemento
@@ -259,9 +259,11 @@ def api_get(
         )
     )
 
+
     dati_cache = cache_get(
         chiave_cache
     )
+
 
     if dati_cache is not None:
 
@@ -348,6 +350,7 @@ def api_get(
         errori = dati.get(
             "errors"
         )
+
 
         if errori:
 
@@ -479,10 +482,12 @@ def formatta_data(
     try:
 
         data = datetime.fromisoformat(
+
             data_string.replace(
                 "Z",
                 "+00:00"
             )
+
         )
 
 
@@ -518,19 +523,26 @@ def formatta_data(
 #
 # IMPORTANTE:
 #
-# NON utilizziamo:
+# Il piano Free dell'API-Football dell'utente
+# restituisce:
 #
+# "Free plans do not have access to the
+#  Next parameter."
+#
+# Inoltre blocca la stagione corrente 2026.
+#
+# NON facciamo quindi:
+#
+# next=8
 # season=2026
-# from=...
-# to=...
+# from=2026...
+# to=2026...
 #
-# perché il piano Free dell'API sta bloccando la stagione
-# corrente.
+# perché questi tentativi sono già stati rifiutati
+# dalla chiave API.
 #
-# Utilizziamo invece:
-#
-# league + next
-#
+# Viene effettuato UN SOLO tentativo diagnostico
+# con la stagione corrente.
 # ============================================================
 
 def recupera_partite(
@@ -553,33 +565,59 @@ def recupera_partite(
     )
 
     print(
-        "🔎 Metodo: parametro NEXT",
+        "🔎 Controllo accesso calendario stagione corrente",
         flush=True
     )
+
+
+    # --------------------------------------------------------
+    # Stagione corrente.
+    #
+    # Dal mese di luglio in poi utilizziamo 2026.
+    # --------------------------------------------------------
+
+    anno = datetime.now().year
+
+    mese = datetime.now().month
+
+
+    if mese >= 7:
+
+        stagione = anno
+
+    else:
+
+        stagione = anno - 1
+
 
     print(
-        f"📊 Numero richiesto: "
-        f"{NUMERO_PARTITE_REPORT}",
+        f"📅 Stagione rilevata: {stagione}",
         flush=True
     )
 
 
-    # ========================================================
-    # PRIMO TENTATIVO
+    # --------------------------------------------------------
+    # TENTATIVO STANDARD
     #
-    # Chiediamo direttamente le prossime partite.
-    #
-    # Questo evita di specificare la stagione 2026.
-    # ========================================================
+    # Facciamo una sola richiesta.
+    # Non usiamo next perché il piano Free lo blocca.
+    # --------------------------------------------------------
 
     dati = api_get(
 
         "fixtures",
 
         {
-            "league": league_id,
-            "next": NUMERO_PARTITE_REPORT,
-            "timezone": "Europe/Rome"
+
+            "league":
+                league_id,
+
+            "season":
+                stagione,
+
+            "timezone":
+                "Europe/Rome"
+
         }
 
     )
@@ -588,15 +626,14 @@ def recupera_partite(
     if not dati:
 
         print(
-            "❌ API non ha restituito "
-            "le prossime partite.",
+            "❌ API-Football non consente "
+            "l'accesso al calendario richiesto.",
             flush=True
         )
 
         print(
-            "⚠️ Il piano Free potrebbe "
-            "non consentire le partite future "
-            "di questa competizione.",
+            "⚠️ Il piano Free non permette "
+            "di recuperare la stagione corrente.",
             flush=True
         )
 
@@ -610,7 +647,7 @@ def recupera_partite(
 
 
     print(
-        f"📊 Partite ricevute dall'API: "
+        f"📊 Eventi ricevuti dall'API: "
         f"{len(eventi)}",
         flush=True
     )
@@ -619,13 +656,18 @@ def recupera_partite(
     if not eventi:
 
         print(
-            "⚠️ Nessuna partita restituita "
-            "dal parametro NEXT.",
+            "⚠️ Nessun evento restituito.",
             flush=True
         )
 
         return []
 
+
+    # --------------------------------------------------------
+    # FILTRA SOLO PARTITE FUTURE
+    # --------------------------------------------------------
+
+    adesso = time.time()
 
     partite = []
 
@@ -650,22 +692,38 @@ def recupera_partite(
 
         stato = (
             fixture
-            .get("status", {})
-            .get("short", "")
+            .get(
+                "status",
+                {}
+            )
+            .get(
+                "short",
+                ""
+            )
         )
 
 
         casa = (
             teams
-            .get("home", {})
-            .get("name")
+            .get(
+                "home",
+                {}
+            )
+            .get(
+                "name"
+            )
         )
 
 
         trasferta = (
             teams
-            .get("away", {})
-            .get("name")
+            .get(
+                "away",
+                {}
+            )
+            .get(
+                "name"
+            )
         )
 
 
@@ -679,14 +737,12 @@ def recupera_partite(
             continue
 
 
-        # ====================================================
-        # STATI ANCORA DA GIOCARE
-        # ====================================================
-
         stati_validi = (
+
             "NS",
             "TBD",
             "PST"
+
         )
 
 
@@ -700,40 +756,69 @@ def recupera_partite(
         )
 
 
+        timestamp = fixture.get(
+            "timestamp",
+            0
+        )
+
+
+        if not timestamp:
+
+            continue
+
+
+        # Solo partite future
+        if timestamp <= adesso:
+
+            continue
+
+
         partite.append({
 
-            "id": fixture_id,
+            "id":
+                fixture_id,
 
-            "casa": casa,
+            "casa":
+                casa,
 
-            "trasferta": trasferta,
+            "trasferta":
+                trasferta,
 
-            "data": data_partita,
+            "data":
+                data_partita,
 
             "timestamp":
-                fixture.get(
-                    "timestamp",
-                    0
-                ),
+                timestamp,
 
-            "stato": stato,
+            "stato":
+                stato,
 
             "casa_id":
                 teams
-                .get("home", {})
-                .get("id"),
+                .get(
+                    "home",
+                    {}
+                )
+                .get(
+                    "id"
+                ),
 
             "trasferta_id":
                 teams
-                .get("away", {})
-                .get("id")
+                .get(
+                    "away",
+                    {}
+                )
+                .get(
+                    "id"
+                )
 
         })
 
 
-    # ========================================================
-    # ORDINA PER DATA
-    # ========================================================
+    # --------------------------------------------------------
+    # ORDINA
+    # --------------------------------------------------------
 
     partite.sort(
 
@@ -746,9 +831,9 @@ def recupera_partite(
     )
 
 
-    # ========================================================
+    # --------------------------------------------------------
     # ELIMINA DUPLICATI
-    # ========================================================
+    # --------------------------------------------------------
 
     uniche = []
 
@@ -761,9 +846,11 @@ def recupera_partite(
 
             continue
 
+
         ids_visti.add(
             partita["id"]
         )
+
 
         uniche.append(
             partita
@@ -841,24 +928,29 @@ def recupera_form_squadra(
     )
 
 
-    dados = api_get(
+    dati = api_get(
 
         "fixtures",
 
         {
-            "team": team_id,
-            "last": NUMERO_PARTITE_FORM
+
+            "team":
+                team_id,
+
+            "last":
+                NUMERO_PARTITE_FORM
+
         }
 
     )
 
 
-    if not dados:
+    if not dati:
 
         return []
 
 
-    eventi = dados.get(
+    eventi = dati.get(
         "response",
         []
     )
@@ -886,15 +978,30 @@ def recupera_form_squadra(
 
 
         squadra_casa = (
+
             teams
-            .get("home", {})
-            .get("id")
+            .get(
+                "home",
+                {}
+            )
+            .get(
+                "id"
+            )
+
         )
 
+
         squadra_trasferta = (
+
             teams
-            .get("away", {})
-            .get("id")
+            .get(
+                "away",
+                {}
+            )
+            .get(
+                "id"
+            )
+
         )
 
 
@@ -908,16 +1015,26 @@ def recupera_form_squadra(
 
 
         stato = (
+
             fixture
-            .get("status", {})
-            .get("short", "")
+            .get(
+                "status",
+                {}
+            )
+            .get(
+                "short",
+                ""
+            )
+
         )
 
 
         if stato not in (
+
             "FT",
             "AET",
             "PEN"
+
         ):
 
             continue
@@ -933,9 +1050,12 @@ def recupera_form_squadra(
 
 
         if gol_casa is None:
+
             continue
 
+
         if gol_trasferta is None:
+
             continue
 
 
@@ -1032,29 +1152,17 @@ def calcola_statistiche(
         return {
 
             "partite": 0,
-
             "vittorie": 0,
-
             "pareggi": 0,
-
             "sconfitte": 0,
-
             "gol_fatti": 0,
-
             "gol_subiti": 0,
-
             "media_gol_fatti": 0.0,
-
             "media_gol_subiti": 0.0,
-
             "punti_media": 0.0,
-
             "forma": "",
-
             "over15": 0,
-
             "over25": 0,
-
             "gol": 0
 
         }
@@ -1224,7 +1332,8 @@ def recupera_pronostico_api(
         "predictions",
 
         {
-            "fixture": fixture_id
+            "fixture":
+                fixture_id
         }
 
     )
@@ -1251,10 +1360,7 @@ def recupera_pronostico_api(
         return None
 
 
-    previsione = risposta[0]
-
-
-    return previsione
+    return risposta[0]
 
 
 # ============================================================
@@ -1317,8 +1423,10 @@ def genera_pronostico_statistico(
 
 
     differenza = (
+
         forza_casa
         - forza_trasferta
+
     )
 
 
@@ -1444,7 +1552,7 @@ def genera_pronostico_statistico(
 
 
 # ============================================================
-# ESTRAE DATI DAL PRONOSTICO API-FOOTBALL
+# INTERPRETA PRONOSTICO API-FOOTBALL
 # ============================================================
 
 def interpreta_pronostico(
@@ -1487,11 +1595,9 @@ def interpreta_pronostico(
         "home"
     )
 
-
     percentuale_pareggio = percentuali.get(
         "draw"
     )
-
 
     percentuale_trasferta = percentuali.get(
         "away"
@@ -1518,7 +1624,6 @@ def interpreta_pronostico(
         "home"
     )
 
-
     gol_trasferta = gol.get(
         "away"
     )
@@ -1534,6 +1639,7 @@ def interpreta_pronostico(
             str(esito_api)
             .lower()
         )
+
 
         if "home" in esito_lower:
 
@@ -1554,8 +1660,10 @@ def interpreta_pronostico(
     else:
 
         fallback = genera_pronostico_statistico(
+
             stats_casa,
             stats_trasferta
+
         )
 
         esito = fallback["esito"]
@@ -1658,14 +1766,18 @@ def interpreta_pronostico(
             try:
 
                 valore_numero = float(
+
                     str(valore)
                     .replace("%", "")
                     .strip()
+
                 )
+
 
                 valori_percentuali.append(
                     valore_numero
                 )
+
 
             except Exception:
 
@@ -1675,18 +1787,23 @@ def interpreta_pronostico(
     if valori_percentuali:
 
         confidence = int(
+
             max(
                 valori_percentuali
             )
+
         )
 
 
     confidence = max(
+
         30,
+
         min(
             confidence,
             90
         )
+
     )
 
 
@@ -1748,8 +1865,10 @@ def interpreta_pronostico(
     if not motivazione:
 
         motivazione = (
+
             "Pronostico elaborato "
             "sulla base dei dati disponibili."
+
         )
 
 
@@ -1799,13 +1918,9 @@ def analizza_partita(
     partita
 ):
 
-    casa = partita[
-        "casa"
-    ]
+    casa = partita["casa"]
 
-    trasferta = partita[
-        "trasferta"
-    ]
+    trasferta = partita["trasferta"]
 
 
     casa_id = partita.get(
@@ -1822,6 +1937,7 @@ def analizza_partita(
         flush=True
     )
 
+
     print(
         f"📊 ANALISI: "
         f"{casa} - {trasferta}",
@@ -1833,6 +1949,7 @@ def analizza_partita(
         casa_id
     )
 
+
     form_trasferta = recupera_form_squadra(
         trasferta_id
     )
@@ -1842,26 +1959,33 @@ def analizza_partita(
         form_casa
     )
 
+
     stats_trasferta = calcola_statistiche(
         form_trasferta
     )
 
 
     print(
+
         f"🏠 {casa}: "
         f"{stats_casa['forma']} | "
         f"GF {stats_casa['media_gol_fatti']:.2f} | "
         f"GS {stats_casa['media_gol_subiti']:.2f}",
+
         flush=True
+
     )
 
 
     print(
+
         f"✈️ {trasferta}: "
         f"{stats_trasferta['forma']} | "
         f"GF {stats_trasferta['media_gol_fatti']:.2f} | "
         f"GS {stats_trasferta['media_gol_subiti']:.2f}",
+
         flush=True
+
     )
 
 
@@ -1871,9 +1995,13 @@ def analizza_partita(
 
 
     pronostico = interpreta_pronostico(
+
         dati_api,
+
         stats_casa,
+
         stats_trasferta
+
     )
 
 
@@ -1906,9 +2034,11 @@ def formatta_pronostico(
         "pronostico"
     ]
 
+
     stats_casa = analisi[
         "stats_casa"
     ]
+
 
     stats_trasferta = analisi[
         "stats_trasferta"
@@ -1920,15 +2050,18 @@ def formatta_pronostico(
         "N/D"
     )
 
+
     gol = pronostico.get(
         "gol",
         "N/D"
     )
 
+
     over25 = pronostico.get(
         "over25",
         "N/D"
     )
+
 
     confidence = pronostico.get(
         "confidence",
@@ -2053,6 +2186,7 @@ def crea_report(
         flush=True
     )
 
+
     print(
         f"🚨 CREAZIONE REPORT: "
         f"{nome_campionato}",
@@ -2071,15 +2205,25 @@ def crea_report(
 
             f"⚽ <b>{nome_campionato}</b>\n\n"
 
-            "❌ API-Football non ha restituito "
-            "partite future disponibili.\n\n"
+            "⚠️ <b>CALENDARIO NON DISPONIBILE</b>\n\n"
 
-            "ℹ️ Il piano Free di API-Football "
-            "potrebbe non consentire l'accesso "
-            "alla stagione corrente.\n\n"
+            "L'API-Football sta rifiutando "
+            "l'accesso alle partite future "
+            "della stagione corrente con "
+            "il piano Free.\n\n"
 
-            "🔧 Il bot e Telegram funzionano "
-            "correttamente."
+            "🔧 Il bot Telegram e il server "
+            "Render funzionano correttamente.\n\n"
+
+            "📡 Il problema riguarda esclusivamente "
+            "l'accesso ai dati del calendario "
+            "tramite il piano API attuale.\n\n"
+
+            "💡 Per ottenere le prossime partite "
+            "reali della stagione corrente serve "
+            "un piano API-Football che permetta "
+            "l'accesso alla stagione corrente "
+            "oppure una diversa sorgente dati."
 
         )
 
@@ -2102,16 +2246,22 @@ def crea_report(
 
 
     for indice, partita in enumerate(
+
         partite,
+
         start=1
+
     ):
 
         print(
+
             f"🏁 Analisi "
             f"{indice}/{len(partite)}: "
             f"{partita['casa']} - "
             f"{partita['trasferta']}",
+
             flush=True
+
         )
 
 
@@ -2153,9 +2303,12 @@ def crea_report(
         except Exception as e:
 
             print(
+
                 f"❌ Errore analisi "
                 f"{partita['id']}: {e}",
+
                 flush=True
+
             )
 
 
@@ -2219,18 +2372,26 @@ def dividi_messaggio(
     while len(rimanente) > limite:
 
         posizione = rimanente.rfind(
+
             "\n━━━━━━━━━━━━━━━━━━",
+
             0,
+
             limite
+
         )
 
 
         if posizione <= 0:
 
             posizione = rimanente.rfind(
+
                 "\n",
+
                 0,
+
                 limite
+
             )
 
 
@@ -2240,13 +2401,21 @@ def dividi_messaggio(
 
 
         blocchi.append(
-            rimanente[:posizione]
+
+            rimanente[
+                :posizione
+            ]
+
         )
 
 
         rimanente = (
-            rimanente[posizione:]
+
+            rimanente[
+                posizione:
+            ]
             .lstrip()
+
         )
 
 
@@ -2272,9 +2441,12 @@ def comando_start(
 ):
 
     print(
+
         f"📩 /start ricevuto "
         f"da chat {message.chat.id}",
+
         flush=True
+
     )
 
 
@@ -2397,9 +2569,11 @@ def trova_campionato(
 ):
 
     testo = (
+
         testo
         .strip()
         .lower()
+
     )
 
 
@@ -2424,8 +2598,11 @@ def trova_campionato(
         if testo == nome_pulito:
 
             return (
+
                 nome,
+
                 dati["id"]
+
             )
 
 
@@ -2452,16 +2629,20 @@ def gestione_messaggio(
 
 
     testo_utente = (
+
         message.text
         .strip()
         .lower()
+
     )
 
 
     nome_campionato, league_id = (
+
         trova_campionato(
             testo_utente
         )
+
     )
 
 
@@ -2484,9 +2665,12 @@ def gestione_messaggio(
 
 
     print(
+
         f"📨 RICHIESTA CAMPIONATO: "
         f"{nome_campionato}",
+
         flush=True
+
     )
 
 
@@ -2497,8 +2681,8 @@ def gestione_messaggio(
         f"⏳ Analizzo "
         f"<b>{nome_campionato}</b>...\n\n"
 
-        "Sto recuperando calendario, "
-        "forma recente e pronostici.\n\n"
+        "Sto verificando il calendario "
+        "e i dati disponibili.\n\n"
 
         "Attendi qualche secondo.",
 
@@ -2519,15 +2703,21 @@ def gestione_messaggio(
 
 
         print(
+
             "📨 Report finale creato.",
+
             flush=True
+
         )
 
 
         print(
+
             f"📏 Lunghezza report: "
             f"{len(report)} caratteri",
+
             flush=True
+
         )
 
 
@@ -2537,14 +2727,20 @@ def gestione_messaggio(
 
 
         for indice, blocco in enumerate(
+
             blocchi,
+
             start=1
+
         ):
 
             print(
+
                 f"📤 Invio messaggio "
                 f"{indice}/{len(blocchi)} ...",
+
                 flush=True
+
             )
 
 
@@ -2560,9 +2756,12 @@ def gestione_messaggio(
 
 
             print(
+
                 f"✅ Messaggio "
                 f"{indice}/{len(blocchi)} inviato.",
+
                 flush=True
+
             )
 
 
@@ -2582,18 +2781,24 @@ def gestione_messaggio(
 
 
         print(
+
             "🏁 REPORT TELEGRAM "
             "INVIATO COMPLETAMENTE.",
+
             flush=True
+
         )
 
 
     except Exception as e:
 
         print(
+
             f"❌ Errore creazione report: "
             f"{e}",
+
             flush=True
+
         )
 
 
@@ -2642,9 +2847,12 @@ class HealthHandler(
     ):
 
         print(
+
             f"🌐 GET ricevuta: "
             f"{self.path}",
+
             flush=True
+
         )
 
 
@@ -2667,20 +2875,30 @@ class HealthHandler(
 
 
         self.send_header(
+
             "Content-Type",
+
             "text/plain; charset=utf-8"
+
         )
 
 
         self.send_header(
+
             "Content-Length",
+
             str(
+
                 len(
+
                     risposta.encode(
                         "utf-8"
                     )
+
                 )
+
             )
+
         )
 
 
@@ -2688,9 +2906,11 @@ class HealthHandler(
 
 
         self.wfile.write(
+
             risposta.encode(
                 "utf-8"
             )
+
         )
 
 
@@ -2703,18 +2923,24 @@ class HealthHandler(
     ):
 
         print(
+
             f"📩 POST RICEVUTA: "
             f"{self.path}",
+
             flush=True
+
         )
 
 
         if self.path != WEBHOOK_PATH:
 
             print(
+
                 f"❌ Percorso webhook "
                 f"non corretto: {self.path}",
+
                 flush=True
+
             )
 
 
@@ -2740,9 +2966,12 @@ class HealthHandler(
 
 
             print(
+
                 f"📩 Dimensione richiesta: "
                 f"{content_length} byte",
+
                 flush=True
+
             )
 
 
@@ -2752,22 +2981,29 @@ class HealthHandler(
 
 
             data = json.loads(
+
                 body.decode(
                     "utf-8"
                 )
+
             )
 
 
             update = (
+
                 telebot.types.Update
                 .de_json(data)
+
             )
 
 
             print(
+
                 "✅ Update Telegram "
                 "decodificato.",
+
                 flush=True
+
             )
 
 
@@ -2777,8 +3013,11 @@ class HealthHandler(
 
 
             self.send_header(
+
                 "Content-Type",
+
                 "text/plain; charset=utf-8"
+
             )
 
 
@@ -2805,17 +3044,23 @@ class HealthHandler(
 
 
             print(
+
                 "✅ Update inviato "
                 "al thread di elaborazione.",
+
                 flush=True
+
             )
 
 
         except Exception as e:
 
             print(
+
                 f"❌ ERRORE WEBHOOK: {e}",
+
                 flush=True
+
             )
 
 
@@ -2860,8 +3105,11 @@ def elabora_update(
     try:
 
         print(
+
             "⚙️ Elaborazione update Telegram...",
+
             flush=True
+
         )
 
 
@@ -2871,17 +3119,23 @@ def elabora_update(
 
 
         print(
+
             "✅ Update Telegram elaborato.",
+
             flush=True
+
         )
 
 
     except Exception as e:
 
         print(
+
             f"❌ Errore elaborazione update: "
             f"{e}",
+
             flush=True
+
         )
 
 
@@ -2892,27 +3146,38 @@ def elabora_update(
 def avvia_server():
 
     server = (
+
         http.server.ThreadingHTTPServer(
+
             (
                 "0.0.0.0",
                 PORT
             ),
+
             HealthHandler
+
         )
+
     )
 
 
     print(
+
         f"🌐 Server HTTP avviato "
         f"sulla porta {PORT}",
+
         flush=True
+
     )
 
 
     print(
+
         f"🔗 Webhook Telegram: "
         f"{WEBHOOK_URL}",
+
         flush=True
+
     )
 
 
@@ -2953,16 +3218,22 @@ def configura_webhook():
 
 
         print(
+
             f"🤖 BOT TELEGRAM: "
             f"@{me.username}",
+
             flush=True
+
         )
 
 
         print(
+
             f"🆔 BOT ID: "
             f"{me.id}",
+
             flush=True
+
         )
 
 
@@ -2992,9 +3263,12 @@ def configura_webhook():
 
 
         print(
+
             f"✅ Webhook impostato: "
             f"{risultato}",
+
             flush=True
+
         )
 
 
@@ -3008,50 +3282,71 @@ def configura_webhook():
 
 
         print(
+
             f"URL: {info.url}",
+
             flush=True
+
         )
 
 
         print(
+
             f"Pending updates: "
             f"{info.pending_update_count}",
+
             flush=True
+
         )
 
 
         print(
+
             f"Ultimo errore: "
             f"{info.last_error_message}",
+
             flush=True
+
         )
 
 
         print(
+
             f"Data ultimo errore: "
             f"{info.last_error_date}",
+
             flush=True
+
         )
 
 
         print(
+
             f"IP Telegram: "
             f"{info.ip_address}",
+
             flush=True
+
         )
 
 
         print(
+
             f"Max connessioni: "
             f"{info.max_connections}",
+
             flush=True
+
         )
 
 
         print(
+
             f"Allowed updates: "
             f"{info.allowed_updates}",
+
             flush=True
+
         )
 
 
@@ -3064,19 +3359,25 @@ def configura_webhook():
         if info.url == WEBHOOK_URL:
 
             print(
+
                 "✅ WEBHOOK TELEGRAM "
                 "CONFIGURATO CORRETTAMENTE.",
+
                 flush=True
+
             )
 
             return True
 
 
         print(
+
             "⚠️ Il webhook restituito "
             "da Telegram non coincide "
             "con quello previsto.",
+
             flush=True
+
         )
 
 
@@ -3086,9 +3387,12 @@ def configura_webhook():
     except Exception as e:
 
         print(
+
             f"❌ ERRORE CONFIGURAZIONE "
             f"WEBHOOK: {e}",
+
             flush=True
+
         )
 
 
@@ -3102,26 +3406,38 @@ def configura_webhook():
 if __name__ == "__main__":
 
     print(
+
         "==========================================",
+
         flush=True
+
     )
 
 
     print(
+
         "⚽ BOT PRONOSTICI CALCIO",
+
         flush=True
+
     )
 
 
     print(
+
         "Avvio applicazione Render...",
+
         flush=True
+
     )
 
 
     print(
+
         "==========================================",
+
         flush=True
+
     )
 
 
@@ -3142,8 +3458,11 @@ if __name__ == "__main__":
 
 
     print(
+
         "Server Render attivo.",
+
         flush=True
+
     )
 
 
@@ -3164,46 +3483,67 @@ if __name__ == "__main__":
     if webhook_ok:
 
         print(
+
             "🟢 Telegram configurato correttamente.",
+
             flush=True
+
         )
 
     else:
 
         print(
+
             "🔴 ATTENZIONE: webhook Telegram "
             "NON configurato.",
+
             flush=True
+
         )
 
 
     print(
+
         "==========================================",
+
         flush=True
+
     )
 
 
     print(
+
         "🚀 BOT ONLINE!",
+
         flush=True
+
     )
 
 
     print(
+
         f"🌐 Render: {RENDER_EXTERNAL_URL}",
+
         flush=True
+
     )
 
 
     print(
+
         f"📡 Webhook: {WEBHOOK_URL}",
+
         flush=True
+
     )
 
 
     print(
+
         "==========================================",
+
         flush=True
+
     )
 
 
@@ -3223,6 +3563,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print(
+
             "🛑 Arresto bot...",
+
             flush=True
+
         )
