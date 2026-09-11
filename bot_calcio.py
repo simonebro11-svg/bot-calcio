@@ -18,6 +18,14 @@ import telebot
 SECRET_FILE = "/etc/secrets/bot_secrets.env"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+# Pulisce eventuali virgolette/spazi/caratteri nascosti
+TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.strip().strip('"').strip("'").strip()
+
+# Mantiene solo il formato Telegram: parte numerica + ":" + parte token
+if ":" in TELEGRAM_BOT_TOKEN:
+    parte_id, parte_token = TELEGRAM_BOT_TOKEN.split(":", 1)
+    TELEGRAM_BOT_TOKEN = parte_id.strip() + ":" + parte_token.strip()
 print("DEBUG TOKEN REPR:", repr(TELEGRAM_BOT_TOKEN))
 print("DEBUG TOKEN PARTI:", TELEGRAM_BOT_TOKEN.split(":"))
 FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
