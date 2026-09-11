@@ -341,6 +341,44 @@ def espn_get_url(
         response = requests.get(
             url,
             params=params or {},
+            timeout=HTTP_TIMEOUT
+        )
+
+        if response.status_code != 200:
+            print(
+                f"⚠️ ESPN HTTP {response.status_code}: "
+                f"{response.url}"
+            )
+            return None
+
+        data = response.json()
+
+        if cache_key and use_cache:
+            cache_set(cache_key, data)
+
+        return data
+
+    except requests.RequestException as exc:
+        print(f"❌ Errore richiesta ESPN: {exc}")
+        return None
+
+    except ValueError as exc:
+        print(f"❌ JSON ESPN non valido: {exc}")
+        return None
+
+    except Exception as exc:
+        print(f"❌ Errore ESPN generico: {exc}")
+        return None
+    if cache_key and use_cache:
+        cached = cache_get(cache_key)
+
+        if cached is not None:
+            return cached
+
+    try:
+        response = requests.get(
+            url,
+            params=params or {},
             timeout=HTTP_TIMEOUT,
             headers={
                 "User-Agent": "BotPronosticiCalcio/1.0"
