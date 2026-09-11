@@ -238,6 +238,15 @@ if not TELEGRAM_BOT_TOKEN:
         "Secret Files di Render."
     )
 
+print("========== CONTROLLO TOKEN ==========")
+print("Token presente:", bool(TELEGRAM_BOT_TOKEN))
+print("Lunghezza token:", len(TELEGRAM_BOT_TOKEN))
+print("Numero di ':' nel token:", TELEGRAM_BOT_TOKEN.count(":"))
+print("Token contiene spazi:", " " in TELEGRAM_BOT_TOKEN)
+print("Token contiene '\\\\':", "\\" in TELEGRAM_BOT_TOKEN)
+print("Token contiene virgolette:", '"' in TELEGRAM_BOT_TOKEN or "'" in TELEGRAM_BOT_TOKEN)
+print("======================================")
+
 bot = telebot.TeleBot(
     TELEGRAM_BOT_TOKEN,
     parse_mode="HTML"
