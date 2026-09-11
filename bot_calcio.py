@@ -190,8 +190,6 @@ CAMPIONATI = {
 # CONFIGURAZIONE ANALISI
 # ============================================================
 
-GIORNI_FUTURI = 14
-
 NUMERO_PARTITE_REPORT = 8
 
 NUMERO_PARTITE_FORM = 10
@@ -466,21 +464,6 @@ def test_api():
 
 
 # ============================================================
-# STAGIONE CORRENTE
-# ============================================================
-
-def stagione_corrente():
-
-    oggi = datetime.now()
-
-    if oggi.month >= 7:
-
-        return oggi.year
-
-    return oggi.year - 1
-
-
-# ============================================================
 # FORMATTA DATA
 # ============================================================
 
@@ -531,134 +514,28 @@ def formatta_data(
 
 
 # ============================================================
-# CONVERSIONE EVENTO API-FOOTBALL
-# ============================================================
-
-def estrai_partita_da_evento(
-    evento
-):
-
-    fixture = evento.get(
-        "fixture",
-        {}
-    )
-
-    teams = evento.get(
-        "teams",
-        {}
-    )
-
-
-    fixture_id = fixture.get(
-        "id"
-    )
-
-
-    stato = (
-        fixture
-        .get("status", {})
-        .get("short", "")
-    )
-
-
-    casa = (
-        teams
-        .get("home", {})
-        .get("name")
-    )
-
-
-    trasferta = (
-        teams
-        .get("away", {})
-        .get("name")
-    )
-
-
-    if not fixture_id:
-
-        return None
-
-
-    if not casa or not trasferta:
-
-        return None
-
-
-    # Partite non ancora iniziate.
-    stati_validi = (
-        "NS",
-        "TBD",
-        "PST"
-    )
-
-
-    if stato not in stati_validi:
-
-        return None
-
-
-    data_partita = fixture.get(
-        "date"
-    )
-
-
-    return {
-
-        "id": fixture_id,
-
-        "casa": casa,
-
-        "trasferta": trasferta,
-
-        "data": data_partita,
-
-        "timestamp":
-            fixture.get(
-                "timestamp",
-                0
-            ),
-
-        "stato": stato,
-
-        "casa_id":
-            teams
-            .get("home", {})
-            .get("id"),
-
-        "trasferta_id":
-            teams
-            .get("away", {})
-            .get("id")
-
-    }
-
-
-# ============================================================
-# RECUPERA PARTITE - METODO PRINCIPALE
+# RECUPERA PROSSIME PARTITE
+#
+# IMPORTANTE:
+#
+# NON utilizziamo:
+#
+# season=2026
+# from=...
+# to=...
+#
+# perché il piano Free dell'API sta bloccando la stagione
+# corrente.
+#
+# Utilizziamo invece:
+#
+# league + next
+#
 # ============================================================
 
 def recupera_partite(
     league_id
 ):
-
-    stagione = stagione_corrente()
-
-    oggi = datetime.now()
-
-    data_inizio = oggi.strftime(
-        "%Y-%m-%d"
-    )
-
-    data_fine = (
-        oggi
-        + timedelta(
-            days=GIORNI_FUTURI
-        )
-    ).strftime(
-        "%Y-%m-%d"
-    )
-
 
     print(
         "==========================================",
@@ -676,20 +553,23 @@ def recupera_partite(
     )
 
     print(
-        f"📅 Periodo: "
-        f"{data_inizio} → {data_fine}",
+        "🔎 Metodo: parametro NEXT",
         flush=True
     )
 
     print(
-        f"📆 Stagione: {stagione}",
+        f"📊 Numero richiesto: "
+        f"{NUMERO_PARTITE_REPORT}",
         flush=True
     )
 
 
     # ========================================================
     # PRIMO TENTATIVO
-    # Richiesta normale con stagione.
+    #
+    # Chiediamo direttamente le prossime partite.
+    #
+    # Questo evita di specificare la stagione 2026.
     # ========================================================
 
     dati = api_get(
@@ -698,279 +578,230 @@ def recupera_partite(
 
         {
             "league": league_id,
-            "season": stagione,
-            "from": data_inizio,
-            "to": data_fine,
+            "next": NUMERO_PARTITE_REPORT,
             "timezone": "Europe/Rome"
         }
 
     )
 
 
-    if dati is not None:
+    if not dati:
 
-        eventi = dati.get(
-            "response",
-            []
+        print(
+            "❌ API non ha restituito "
+            "le prossime partite.",
+            flush=True
         )
 
+        print(
+            "⚠️ Il piano Free potrebbe "
+            "non consentire le partite future "
+            "di questa competizione.",
+            flush=True
+        )
 
-        if eventi:
-
-            print(
-                f"📊 Partite ricevute: "
-                f"{len(eventi)}",
-                flush=True
-            )
-
-            partite = []
+        return []
 
 
-            for evento in eventi:
+    eventi = dati.get(
+        "response",
+        []
+    )
 
-                partita = estrai_partita_da_evento(
-                    evento
-                )
-
-                if partita:
-
-                    partite.append(
-                        partita
-                    )
-
-
-            partite.sort(
-                key=lambda x:
-                x.get(
-                    "timestamp",
-                    0
-                )
-            )
-
-
-            uniche = []
-
-            ids_visti = set()
-
-
-            for partita in partite:
-
-                if partita["id"] in ids_visti:
-
-                    continue
-
-                ids_visti.add(
-                    partita["id"]
-                )
-
-                uniche.append(
-                    partita
-                )
-
-
-            uniche = uniche[
-                :NUMERO_PARTITE_REPORT
-            ]
-
-
-            print(
-                f"✅ Prossime partite trovate: "
-                f"{len(uniche)}",
-                flush=True
-            )
-
-            print(
-                "==========================================",
-                flush=True
-            )
-
-
-            return uniche
-
-
-    # ========================================================
-    # FALLBACK PIANO FREE
-    #
-    # Se la stagione corrente non è disponibile,
-    # cerchiamo le partite tramite la DATA.
-    #
-    # Questo evita di inviare season=2026.
-    # ========================================================
 
     print(
-        "⚠️ Stagione corrente non disponibile "
-        "con la richiesta standard.",
+        f"📊 Partite ricevute dall'API: "
+        f"{len(eventi)}",
         flush=True
     )
 
-    print(
-        "🔄 ATTIVO FALLBACK RICERCA PER DATA...",
-        flush=True
-    )
 
-    print(
-        "📅 Cerco le partite giorno per giorno "
-        "senza parametro season.",
-        flush=True
-    )
+    if not eventi:
+
+        print(
+            "⚠️ Nessuna partita restituita "
+            "dal parametro NEXT.",
+            flush=True
+        )
+
+        return []
 
 
     partite = []
 
-    ids_visti = set()
 
+    for evento in eventi:
 
-    data_corrente = oggi
+        fixture = evento.get(
+            "fixture",
+            {}
+        )
 
-
-    for giorno in range(
-        GIORNI_FUTURI + 1
-    ):
-
-        if len(partite) >= NUMERO_PARTITE_REPORT:
-
-            break
-
-
-        data_da_cercare = (
-            oggi
-            + timedelta(
-                days=giorno
-            )
-        ).strftime(
-            "%Y-%m-%d"
+        teams = evento.get(
+            "teams",
+            {}
         )
 
 
-        print(
-            "------------------------------------------",
-            flush=True
-        )
-
-        print(
-            f"📅 Ricerca partite del "
-            f"{data_da_cercare}",
-            flush=True
+        fixture_id = fixture.get(
+            "id"
         )
 
 
-        dati_giorno = api_get(
-
-            "fixtures",
-
-            {
-                "league": league_id,
-                "date": data_da_cercare,
-                "timezone": "Europe/Rome"
-            }
-
+        stato = (
+            fixture
+            .get("status", {})
+            .get("short", "")
         )
 
 
-        if not dati_giorno:
+        casa = (
+            teams
+            .get("home", {})
+            .get("name")
+        )
 
-            print(
-                f"⚠️ Nessun dato per "
-                f"{data_da_cercare}",
-                flush=True
-            )
+
+        trasferta = (
+            teams
+            .get("away", {})
+            .get("name")
+        )
+
+
+        if not fixture_id:
 
             continue
 
 
-        eventi = dati_giorno.get(
-            "response",
-            []
+        if not casa or not trasferta:
+
+            continue
+
+
+        # ====================================================
+        # STATI ANCORA DA GIOCARE
+        # ====================================================
+
+        stati_validi = (
+            "NS",
+            "TBD",
+            "PST"
         )
 
 
-        print(
-            f"📊 Eventi ricevuti: "
-            f"{len(eventi)}",
-            flush=True
+        if stato not in stati_validi:
+
+            continue
+
+
+        data_partita = fixture.get(
+            "date"
         )
 
 
-        for evento in eventi:
+        partite.append({
 
-            partita = estrai_partita_da_evento(
-                evento
-            )
+            "id": fixture_id,
 
+            "casa": casa,
 
-            if not partita:
+            "trasferta": trasferta,
 
-                continue
+            "data": data_partita,
 
+            "timestamp":
+                fixture.get(
+                    "timestamp",
+                    0
+                ),
 
-            fixture_id = partita["id"]
+            "stato": stato,
 
+            "casa_id":
+                teams
+                .get("home", {})
+                .get("id"),
 
-            if fixture_id in ids_visti:
+            "trasferta_id":
+                teams
+                .get("away", {})
+                .get("id")
 
-                continue
-
-
-            ids_visti.add(
-                fixture_id
-            )
-
-
-            partite.append(
-                partita
-            )
-
-
-            print(
-                f"✅ Partita trovata: "
-                f"{partita['casa']} - "
-                f"{partita['trasferta']}",
-                flush=True
-            )
+        })
 
 
-            if len(partite) >= NUMERO_PARTITE_REPORT:
-
-                break
-
+    # ========================================================
+    # ORDINA PER DATA
+    # ========================================================
 
     partite.sort(
+
         key=lambda x:
         x.get(
             "timestamp",
             0
         )
+
     )
 
 
-    partite = partite[
+    # ========================================================
+    # ELIMINA DUPLICATI
+    # ========================================================
+
+    uniche = []
+
+    ids_visti = set()
+
+
+    for partita in partite:
+
+        if partita["id"] in ids_visti:
+
+            continue
+
+        ids_visti.add(
+            partita["id"]
+        )
+
+        uniche.append(
+            partita
+        )
+
+
+    uniche = uniche[
         :NUMERO_PARTITE_REPORT
     ]
 
 
     print(
+        f"✅ Prossime partite trovate: "
+        f"{len(uniche)}",
+        flush=True
+    )
+
+
+    for partita in uniche:
+
+        print(
+
+            f"⚽ {partita['casa']} - "
+            f"{partita['trasferta']} | "
+            f"{formatta_data(partita['data'])}",
+
+            flush=True
+
+        )
+
+
+    print(
         "==========================================",
         flush=True
     )
 
-    print(
-        f"🏁 FALLBACK COMPLETATO.",
-        flush=True
-    )
 
-    print(
-        f"⚽ Partite trovate: "
-        f"{len(partite)}",
-        flush=True
-    )
-
-    print(
-        "==========================================",
-        flush=True
-    )
-
-
-    return partite
+    return uniche
 
 
 # ============================================================
@@ -1010,25 +841,24 @@ def recupera_form_squadra(
     )
 
 
-    dati = api_get(
+    dados = api_get(
 
         "fixtures",
 
         {
             "team": team_id,
-            "last": NUMERO_PARTITE_FORM,
-            "status": "FT"
+            "last": NUMERO_PARTITE_FORM
         }
 
     )
 
 
-    if not dati:
+    if not dados:
 
         return []
 
 
-    eventi = dati.get(
+    eventi = dados.get(
         "response",
         []
     )
@@ -1070,7 +900,24 @@ def recupera_form_squadra(
 
         if (
             squadra_casa != team_id
-            and squadra_trasferta != team_id
+            and
+            squadra_trasferta != team_id
+        ):
+
+            continue
+
+
+        stato = (
+            fixture
+            .get("status", {})
+            .get("short", "")
+        )
+
+
+        if stato not in (
+            "FT",
+            "AET",
+            "PEN"
         ):
 
             continue
@@ -1677,9 +1524,9 @@ def interpreta_pronostico(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # ESITO
-    # --------------------------------------------------------
+    # ========================================================
 
     if esito_api:
 
@@ -1714,9 +1561,9 @@ def interpreta_pronostico(
         esito = fallback["esito"]
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # OVER / UNDER
-    # --------------------------------------------------------
+    # ========================================================
 
     if under_over:
 
@@ -1752,9 +1599,9 @@ def interpreta_pronostico(
             over25 = "UNDER 2.5"
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # GOL / NO GOL
-    # --------------------------------------------------------
+    # ========================================================
 
     gol_api = predictions.get(
         "both_teams_score"
@@ -1788,9 +1635,9 @@ def interpreta_pronostico(
             gol = "NO GOL"
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # AFFIDABILITÀ
-    # --------------------------------------------------------
+    # ========================================================
 
     confidence = 55
 
@@ -1843,9 +1690,9 @@ def interpreta_pronostico(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # MOTIVAZIONE
-    # --------------------------------------------------------
+    # ========================================================
 
     motivazione_parts = []
 
@@ -2224,12 +2071,15 @@ def crea_report(
 
             f"⚽ <b>{nome_campionato}</b>\n\n"
 
-            "❌ Nessuna partita trovata "
-            f"nei prossimi {GIORNI_FUTURI} giorni.\n\n"
+            "❌ API-Football non ha restituito "
+            "partite future disponibili.\n\n"
 
-            "ℹ️ API-Football non ha restituito "
-            "partite disponibili per il periodo "
-            "richiesto."
+            "ℹ️ Il piano Free di API-Football "
+            "potrebbe non consentire l'accesso "
+            "alla stagione corrente.\n\n"
+
+            "🔧 Il bot e Telegram funzionano "
+            "correttamente."
 
         )
 
@@ -2686,25 +2536,16 @@ def gestione_messaggio(
         )
 
 
-        print(
-            f"📤 Invio messaggio "
-            f"1/{len(blocchi)} ...",
-            flush=True
-        )
-
-
         for indice, blocco in enumerate(
             blocchi,
             start=1
         ):
 
-            if indice > 1:
-
-                print(
-                    f"📤 Invio messaggio "
-                    f"{indice}/{len(blocchi)} ...",
-                    flush=True
-                )
+            print(
+                f"📤 Invio messaggio "
+                f"{indice}/{len(blocchi)} ...",
+                flush=True
+            )
 
 
             bot.send_message(
@@ -2930,8 +2771,6 @@ class HealthHandler(
             )
 
 
-            # Risposta immediata a Telegram.
-
             self.send_response(
                 200
             )
@@ -2950,8 +2789,6 @@ class HealthHandler(
                 b"OK"
             )
 
-
-            # Elaborazione in background.
 
             thread = threading.Thread(
 
@@ -3106,8 +2943,6 @@ def configura_webhook():
 
     try:
 
-        # Controlliamo che il token sia valido.
-
         print(
             "🔎 Verifica bot Telegram...",
             flush=True
@@ -3132,7 +2967,7 @@ def configura_webhook():
 
 
         print(
-            f"🔗 Impostazione webhook:",
+            "🔗 Impostazione webhook:",
             flush=True
         )
 
@@ -3142,12 +2977,6 @@ def configura_webhook():
             flush=True
         )
 
-
-        # ====================================================
-        # IMPORTANTE
-        # Nessun timeout.
-        # Nessun polling.
-        # ====================================================
 
         risultato = bot.set_webhook(
 
@@ -3168,8 +2997,6 @@ def configura_webhook():
             flush=True
         )
 
-
-        # Verifica dello stato reale.
 
         info = bot.get_webhook_info()
 
