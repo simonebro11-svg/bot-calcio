@@ -436,28 +436,40 @@ def trova_team_ricorsivo(
 # PARTITE FUTURE
 # ============================================================
 
+```python
 def recupera_partite_future(campionato: str) -> List[Dict[str, Any]]:
-    print(
-        f"📅 Recupero partite future: {campionato}"
-    )
+    print(f"📅 Recupero partite future: {campionato}")
 
     cache_key = f"future_matches_{campionato}"
 
     cached = cache_get(cache_key)
 
     if cached is not None:
+        print(f"📦 Uso cache: {len(cached)} partite")
         return cached
 
+    # Usiamo UTC per confrontare correttamente le date restituite da ESPN.
     oggi = datetime.now(timezone.utc)
 
     eventi = []
     ids_visti = set()
 
+    print(
+        f"🔎 Ricerca ESPN da "
+        f"{oggi.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"per i prossimi {GIORNI_FUTURI} giorni"
+    )
+
     for giorno_offset in range(GIORNI_FUTURI):
 
         giorno = oggi + timedelta(days=giorno_offset)
 
+        # ESPN richiede YYYYMMDD
         data_str = giorno.strftime("%Y%m%d")
+
+        print(
+            f"   📅 ESPN {campionato} - data {data_str}"
+        )
 
         data = espn_get(
             f"{campionato}/scoreboard",
@@ -468,11 +480,21 @@ def recupera_partite_future(campionato: str) -> List[Dict[str, Any]]:
         )
 
         if not data:
+            print(
+                f"   ⚠️ Nessuna risposta ESPN per {data_str}"
+            )
             continue
 
-        for evento in data.get("events", []):
+        eventi_giorno = data.get("events", [])
 
-            event_id = str(evento.get("id", ""))
+        print(
+            f"   📊 Eventi ESPN trovati: "
+            f"{len(eventi_giorno)}"
+        )
+
+        for evento in eventi_giorno:
+
+            event_id = str(evento.get("id", "")).strip()
 
             if not event_id:
                 continue
@@ -480,26 +502,46 @@ def recupera_partite_future(campionato: str) -> List[Dict[str, Any]]:
             if event_id in ids_visti:
                 continue
 
-            ids_visti.add(event_id)
-
             dt = parse_datetime(
                 evento.get("date", "")
             )
 
             if not dt:
+                print(
+                    f"   ⚠️ Data non leggibile "
+                    f"per evento {event_id}"
+                )
                 continue
 
+            # Convertiamo a UTC se necessario
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+
+            # Ignora le partite già iniziate/concluse
             if dt <= oggi:
                 continue
 
             home, away = estrai_competitors(evento)
 
             if not home or not away:
+                print(
+                    f"   ⚠️ Squadre non trovate "
+                    f"per evento {event_id}"
+                )
                 continue
+
+            ids_visti.add(event_id)
 
             evento["_datetime"] = dt
 
             eventi.append(evento)
+
+            print(
+                f"   ✅ {home} - {away} "
+                f"| {dt.strftime('%d/%m/%Y %H:%M UTC')}"
+            )
 
     eventi.sort(
         key=lambda x: x.get("_datetime")
@@ -508,13 +550,19 @@ def recupera_partite_future(campionato: str) -> List[Dict[str, Any]]:
 
     risultati = eventi[:NUM_PARTITE_REPORT]
 
-    cache_set(cache_key, risultati)
+    cache_set(
+        cache_key,
+        risultati
+    )
 
     print(
-        f"📅 Partite future trovate: {len(risultati)}"
+        f"📅 Partite future trovate: "
+        f"{len(risultati)}"
     )
 
     return risultati
+```
+
 
 
 # ============================================================
