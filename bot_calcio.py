@@ -531,7 +531,111 @@ def formatta_data(
 
 
 # ============================================================
-# RECUPERA PROSSIME PARTITE
+# CONVERSIONE EVENTO API-FOOTBALL
+# ============================================================
+
+def estrai_partita_da_evento(
+    evento
+):
+
+    fixture = evento.get(
+        "fixture",
+        {}
+    )
+
+    teams = evento.get(
+        "teams",
+        {}
+    )
+
+
+    fixture_id = fixture.get(
+        "id"
+    )
+
+
+    stato = (
+        fixture
+        .get("status", {})
+        .get("short", "")
+    )
+
+
+    casa = (
+        teams
+        .get("home", {})
+        .get("name")
+    )
+
+
+    trasferta = (
+        teams
+        .get("away", {})
+        .get("name")
+    )
+
+
+    if not fixture_id:
+
+        return None
+
+
+    if not casa or not trasferta:
+
+        return None
+
+
+    # Partite non ancora iniziate.
+    stati_validi = (
+        "NS",
+        "TBD",
+        "PST"
+    )
+
+
+    if stato not in stati_validi:
+
+        return None
+
+
+    data_partita = fixture.get(
+        "date"
+    )
+
+
+    return {
+
+        "id": fixture_id,
+
+        "casa": casa,
+
+        "trasferta": trasferta,
+
+        "data": data_partita,
+
+        "timestamp":
+            fixture.get(
+                "timestamp",
+                0
+            ),
+
+        "stato": stato,
+
+        "casa_id":
+            teams
+            .get("home", {})
+            .get("id"),
+
+        "trasferta_id":
+            teams
+            .get("away", {})
+            .get("id")
+
+    }
+
+
+# ============================================================
+# RECUPERA PARTITE - METODO PRINCIPALE
 # ============================================================
 
 def recupera_partite(
@@ -583,6 +687,11 @@ def recupera_partite(
     )
 
 
+    # ========================================================
+    # PRIMO TENTATIVO
+    # Richiesta normale con stagione.
+    # ========================================================
+
     dati = api_get(
 
         "fixtures",
@@ -598,128 +707,231 @@ def recupera_partite(
     )
 
 
-    if not dati:
+    if dati is not None:
 
-        print(
-            "❌ Nessun dato partite.",
-            flush=True
+        eventi = dati.get(
+            "response",
+            []
         )
 
-        return []
+
+        if eventi:
+
+            print(
+                f"📊 Partite ricevute: "
+                f"{len(eventi)}",
+                flush=True
+            )
+
+            partite = []
 
 
-    eventi = dati.get(
-        "response",
-        []
-    )
+            for evento in eventi:
 
+                partita = estrai_partita_da_evento(
+                    evento
+                )
+
+                if partita:
+
+                    partite.append(
+                        partita
+                    )
+
+
+            partite.sort(
+                key=lambda x:
+                x.get(
+                    "timestamp",
+                    0
+                )
+            )
+
+
+            uniche = []
+
+            ids_visti = set()
+
+
+            for partita in partite:
+
+                if partita["id"] in ids_visti:
+
+                    continue
+
+                ids_visti.add(
+                    partita["id"]
+                )
+
+                uniche.append(
+                    partita
+                )
+
+
+            uniche = uniche[
+                :NUMERO_PARTITE_REPORT
+            ]
+
+
+            print(
+                f"✅ Prossime partite trovate: "
+                f"{len(uniche)}",
+                flush=True
+            )
+
+            print(
+                "==========================================",
+                flush=True
+            )
+
+
+            return uniche
+
+
+    # ========================================================
+    # FALLBACK PIANO FREE
+    #
+    # Se la stagione corrente non è disponibile,
+    # cerchiamo le partite tramite la DATA.
+    #
+    # Questo evita di inviare season=2026.
+    # ========================================================
 
     print(
-        f"📊 Partite ricevute: "
-        f"{len(eventi)}",
+        "⚠️ Stagione corrente non disponibile "
+        "con la richiesta standard.",
+        flush=True
+    )
+
+    print(
+        "🔄 ATTIVO FALLBACK RICERCA PER DATA...",
+        flush=True
+    )
+
+    print(
+        "📅 Cerco le partite giorno per giorno "
+        "senza parametro season.",
         flush=True
     )
 
 
     partite = []
 
-
-    for evento in eventi:
-
-        fixture = evento.get(
-            "fixture",
-            {}
-        )
-
-        teams = evento.get(
-            "teams",
-            {}
-        )
+    ids_visti = set()
 
 
-        fixture_id = fixture.get(
-            "id"
-        )
+    data_corrente = oggi
 
 
-        stato = (
-            fixture
-            .get("status", {})
-            .get("short", "")
-        )
+    for giorno in range(
+        GIORNI_FUTURI + 1
+    ):
+
+        if len(partite) >= NUMERO_PARTITE_REPORT:
+
+            break
 
 
-        casa = (
-            teams
-            .get("home", {})
-            .get("name")
+        data_da_cercare = (
+            oggi
+            + timedelta(
+                days=giorno
+            )
+        ).strftime(
+            "%Y-%m-%d"
         )
 
 
-        trasferta = (
-            teams
-            .get("away", {})
-            .get("name")
+        print(
+            "------------------------------------------",
+            flush=True
+        )
+
+        print(
+            f"📅 Ricerca partite del "
+            f"{data_da_cercare}",
+            flush=True
         )
 
 
-        if not fixture_id:
+        dati_giorno = api_get(
+
+            "fixtures",
+
+            {
+                "league": league_id,
+                "date": data_da_cercare,
+                "timezone": "Europe/Rome"
+            }
+
+        )
+
+
+        if not dati_giorno:
+
+            print(
+                f"⚠️ Nessun dato per "
+                f"{data_da_cercare}",
+                flush=True
+            )
 
             continue
 
 
-        if not casa or not trasferta:
-
-            continue
-
-
-        # Partite non ancora iniziate.
-        stati_validi = (
-            "NS",
-            "TBD",
-            "PST"
+        eventi = dati_giorno.get(
+            "response",
+            []
         )
 
 
-        if stato not in stati_validi:
-
-            continue
-
-
-        data_partita = fixture.get(
-            "date"
+        print(
+            f"📊 Eventi ricevuti: "
+            f"{len(eventi)}",
+            flush=True
         )
 
 
-        partite.append({
+        for evento in eventi:
 
-            "id": fixture_id,
+            partita = estrai_partita_da_evento(
+                evento
+            )
 
-            "casa": casa,
 
-            "trasferta": trasferta,
+            if not partita:
 
-            "data": data_partita,
+                continue
 
-            "timestamp":
-                fixture.get(
-                    "timestamp",
-                    0
-                ),
 
-            "stato": stato,
+            fixture_id = partita["id"]
 
-            "casa_id":
-                teams
-                .get("home", {})
-                .get("id"),
 
-            "trasferta_id":
-                teams
-                .get("away", {})
-                .get("id")
+            if fixture_id in ids_visti:
 
-        })
+                continue
+
+
+            ids_visti.add(
+                fixture_id
+            )
+
+
+            partite.append(
+                partita
+            )
+
+
+            print(
+                f"✅ Partita trovata: "
+                f"{partita['casa']} - "
+                f"{partita['trasferta']}",
+                flush=True
+            )
+
+
+            if len(partite) >= NUMERO_PARTITE_REPORT:
+
+                break
 
 
     partite.sort(
@@ -731,36 +943,24 @@ def recupera_partite(
     )
 
 
-    # Elimina duplicati.
-
-    uniche = []
-
-    ids_visti = set()
-
-
-    for partita in partite:
-
-        if partita["id"] in ids_visti:
-
-            continue
-
-        ids_visti.add(
-            partita["id"]
-        )
-
-        uniche.append(
-            partita
-        )
-
-
-    uniche = uniche[
+    partite = partite[
         :NUMERO_PARTITE_REPORT
     ]
 
 
     print(
-        f"✅ Prossime partite trovate: "
-        f"{len(uniche)}",
+        "==========================================",
+        flush=True
+    )
+
+    print(
+        f"🏁 FALLBACK COMPLETATO.",
+        flush=True
+    )
+
+    print(
+        f"⚽ Partite trovate: "
+        f"{len(partite)}",
         flush=True
     )
 
@@ -770,7 +970,7 @@ def recupera_partite(
     )
 
 
-    return uniche
+    return partite
 
 
 # ============================================================
@@ -2025,7 +2225,11 @@ def crea_report(
             f"⚽ <b>{nome_campionato}</b>\n\n"
 
             "❌ Nessuna partita trovata "
-            f"nei prossimi {GIORNI_FUTURI} giorni."
+            f"nei prossimi {GIORNI_FUTURI} giorni.\n\n"
+
+            "ℹ️ API-Football non ha restituito "
+            "partite disponibili per il periodo "
+            "richiesto."
 
         )
 
@@ -2941,8 +3145,8 @@ def configura_webhook():
 
         # ====================================================
         # IMPORTANTE
-        # Non usiamo remove_webhook(timeout=30).
-        # Non usiamo timeout.
+        # Nessun timeout.
+        # Nessun polling.
         # ====================================================
 
         risultato = bot.set_webhook(
