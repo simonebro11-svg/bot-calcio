@@ -183,24 +183,20 @@ print(
     or "'" in TELEGRAM_BOT_TOKEN
 )
 
-print(
-    "Posizioni dei ':' :",
-    [
-        i
-        for i, carattere
-        in enumerate(TELEGRAM_BOT_TOKEN)
-        if carattere == ":"
-    ]
-)
+parti_token = TELEGRAM_BOT_TOKEN.split(":")
 
-print(
-    "Lunghezze delle parti:",
-    [
-        len(parte)
-        for parte
-        in TELEGRAM_BOT_TOKEN.split(":")
-    ]
-)
+print("========== DIAGNOSI TOKEN ==========")
+print("Numero parti:", len(parti_token))
+print("Lunghezze:", [len(parte) for parte in parti_token])
+
+for i, parte in enumerate(parti_token):
+    print(
+        f"Parte {i + 1}: "
+        f"inizia_con_numero={parte[:1].isdigit()}, "
+        f"lunghezza={len(parte)}"
+    )
+
+print("====================================")
 
 print("======================================")
 
