@@ -150,7 +150,64 @@ if not TELEGRAM_BOT_TOKEN:
         "TELEGRAM_BOT_TOKEN non configurato. "
         "Inseriscilo nelle Environment Variables / Secret Files di Render."
     )
+print("========== CONTROLLO TOKEN ==========")
 
+print(
+    "Token presente:",
+    bool(TELEGRAM_BOT_TOKEN)
+)
+
+print(
+    "Lunghezza token:",
+    len(TELEGRAM_BOT_TOKEN)
+)
+
+print(
+    "Numero di ':' nel token:",
+    TELEGRAM_BOT_TOKEN.count(":")
+)
+
+print(
+    "Token contiene spazi:",
+    " " in TELEGRAM_BOT_TOKEN
+)
+
+print(
+    "Token contiene '\\\\':",
+    "\\" in TELEGRAM_BOT_TOKEN
+)
+
+print(
+    "Token contiene virgolette:",
+    '"' in TELEGRAM_BOT_TOKEN
+    or "'" in TELEGRAM_BOT_TOKEN
+)
+
+print(
+    "Posizioni dei ':' :",
+    [
+        i
+        for i, carattere
+        in enumerate(TELEGRAM_BOT_TOKEN)
+        if carattere == ":"
+    ]
+)
+
+print(
+    "Lunghezze delle parti:",
+    [
+        len(parte)
+        for parte
+        in TELEGRAM_BOT_TOKEN.split(":")
+    ]
+)
+
+print("======================================")
+
+bot = telebot.TeleBot(
+    TELEGRAM_BOT_TOKEN,
+    parse_mode="HTML"
+)
 bot = telebot.TeleBot(
     TELEGRAM_BOT_TOKEN,
     parse_mode="HTML"
