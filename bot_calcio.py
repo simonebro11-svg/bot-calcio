@@ -436,7 +436,6 @@ def trova_team_ricorsivo(
 # PARTITE FUTURE
 # ============================================================
 
-```python
 def recupera_partite_future(campionato: str) -> List[Dict[str, Any]]:
     print(f"📅 Recupero partite future: {campionato}")
 
@@ -561,8 +560,6 @@ def recupera_partite_future(campionato: str) -> List[Dict[str, Any]]:
     )
 
     return risultati
-```
-
 
 
 # ============================================================
