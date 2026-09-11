@@ -4,6 +4,8 @@ import time
 import math
 import threading
 import http.server
+import traceback
+
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -11,7 +13,7 @@ import telebot
 
 
 # ============================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE RENDER
 # ============================================================
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -24,14 +26,25 @@ RENDER_EXTERNAL_URL = os.getenv(
 WEBHOOK_PATH = "/telegram/webhook"
 WEBHOOK_URL = RENDER_EXTERNAL_URL + WEBHOOK_PATH
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
 
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
-ESPN_STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports/soccer"
+FOOTBALL_API_KEY = os.getenv(
+    "FOOTBALL_API_KEY",
+    ""
+).strip()
+
+ESPN_BASE = (
+    "https://site.api.espn.com/apis/site/v2/sports/soccer"
+)
+
+ESPN_STANDINGS_BASE = (
+    "https://site.api.espn.com/apis/v2/sports/soccer"
+)
 
 HTTP_TIMEOUT = 15
-
 CACHE_TTL = 30 * 60
 
 GIORNI_FUTURI = 14
@@ -40,27 +53,30 @@ NUM_FORM = 10
 
 
 # ============================================================
-# CONTROLLO TOKEN
+# CONTROLLO CONFIGURAZIONE
 # ============================================================
 
-print("=" * 50)
+print("==========================================")
 print("⚽ BOT PRONOSTICI CALCIO")
 print("Avvio applicazione Render...")
-print("=" * 50)
+print("==========================================")
 
 if TELEGRAM_BOT_TOKEN:
     print("TELEGRAM_BOT_TOKEN: OK")
 else:
-    print("TELEGRAM_BOT_TOKEN: MANCANTE")
+    print("❌ TELEGRAM_BOT_TOKEN: MANCANTE")
 
 if FOOTBALL_API_KEY:
-    print("FOOTBALL_API_KEY: OK (secondaria)")
+    print("FOOTBALL_API_KEY: OK")
 else:
-    print("FOOTBALL_API_KEY: MANCANTE (non necessaria per ESPN)")
+    print("⚠️ FOOTBALL_API_KEY: MANCANTE")
+
+print("==========================================")
+
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN non trovato nelle variabili di ambiente."
+        "TELEGRAM_BOT_TOKEN non configurato su Render."
     )
 
 
@@ -119,40 +135,33 @@ CACHE_LOCK = threading.Lock()
 
 def cache_get(key):
     with CACHE_LOCK:
-        item = CACHE.get(key)
+        elemento = CACHE.get(key)
 
-        if not item:
+        if not elemento:
             return None
 
-        timestamp, value = item
+        timestamp, valore = elemento
 
         if time.time() - timestamp > CACHE_TTL:
             del CACHE[key]
             return None
 
-        return value
+        return valore
 
 
-def cache_set(key, value):
+def cache_set(key, valore):
     with CACHE_LOCK:
-        CACHE[key] = (time.time(), value)
+        CACHE[key] = (time.time(), valore)
 
 
 # ============================================================
-# UTILITY
+# FUNZIONI DI SUPPORTO
 # ============================================================
 
 def safe_int(value, default=0):
     try:
         if value is None:
             return default
-
-        if isinstance(value, bool):
-            return int(value)
-
-        if isinstance(value, str):
-            value = value.replace(",", ".").strip()
-
         return int(float(value))
     except Exception:
         return default
@@ -162,10 +171,6 @@ def safe_float(value, default=0.0):
     try:
         if value is None:
             return default
-
-        if isinstance(value, str):
-            value = value.replace(",", ".").strip()
-
         return float(value)
     except Exception:
         return default
@@ -176,21 +181,22 @@ def normalizza_nome(nome):
         return ""
 
     return (
-        nome.lower()
-        .replace(".", "")
+        str(nome)
+        .lower()
         .replace("-", " ")
         .replace("_", " ")
+        .replace(".", "")
         .strip()
     )
 
 
-def parse_data(data_string):
-    if not data_string:
+def parse_data(value):
+    if not value:
         return None
 
     try:
         return datetime.fromisoformat(
-            data_string.replace("Z", "+00:00")
+            value.replace("Z", "+00:00")
         )
     except Exception:
         return None
@@ -200,21 +206,39 @@ def oggi_utc():
     return datetime.now(timezone.utc)
 
 
-def format_data_italiana(data):
-    if not data:
-        return "data da definire"
+def format_data_italiana(value):
+    dt = parse_data(value)
 
-    try:
-        return data.astimezone().strftime("%d/%m/%Y %H:%M")
-    except Exception:
-        return data.strftime("%d/%m/%Y %H:%M")
+    if not dt:
+        return "Data non disponibile"
+
+    mesi = [
+        "gennaio",
+        "febbraio",
+        "marzo",
+        "aprile",
+        "maggio",
+        "giugno",
+        "luglio",
+        "agosto",
+        "settembre",
+        "ottobre",
+        "novembre",
+        "dicembre"
+    ]
+
+    return (
+        f"{dt.day} {mesi[dt.month - 1]} "
+        f"{dt.year} alle {dt.strftime('%H:%M')}"
+    )
 
 
 # ============================================================
-# ESPN HTTP
+# RICHIESTE ESPN
 # ============================================================
 
 def espn_get(url, params=None, cache_key=None):
+
     if cache_key:
         cached = cache_get(cache_key)
 
@@ -223,10 +247,10 @@ def espn_get(url, params=None, cache_key=None):
 
     try:
         response = requests.get(
-    url,
-    params=params,
-    timeout=HTTP_TIMEOUT
-)
+            url,
+            params=params,
+            timeout=HTTP_TIMEOUT
+        )
 
         if response.status_code != 200:
             print(
@@ -242,24 +266,34 @@ def espn_get(url, params=None, cache_key=None):
 
         return data
 
-    except requests.RequestException as e:
-        print(f"⚠️ Errore ESPN: {e}")
+    except requests.RequestException as exc:
+        print(
+            f"⚠️ Errore richiesta ESPN: {exc}"
+        )
         return {}
 
-    except Exception as e:
-        print(f"⚠️ Errore parsing ESPN: {e}")
+    except ValueError as exc:
+        print(
+            f"⚠️ JSON ESPN non valido: {exc}"
+        )
+        return {}
+
+    except Exception as exc:
+        print(
+            f"⚠️ Errore ESPN: {exc}"
+        )
         return {}
 
 
 # ============================================================
-# ESTRAZIONE EVENTI ESPN
+# EVENTI ESPN
 # ============================================================
 
 def estrai_eventi(data):
     if not isinstance(data, dict):
         return []
 
-    eventi = data.get("events")
+    eventi = data.get("events", [])
 
     if isinstance(eventi, list):
         return eventi
@@ -267,140 +301,175 @@ def estrai_eventi(data):
     return []
 
 
-def estrai_competizione(event):
-    competitions = event.get("competitions", [])
+def estrai_competizione(evento):
+    try:
+        competitions = evento.get(
+            "competitions",
+            []
+        )
 
-    if not competitions:
-        return {}
+        if not competitions:
+            return ""
 
-    if isinstance(competitions[0], dict):
-        return competitions[0]
+        competition = competitions[0]
 
-    return {}
+        league = competition.get(
+            "league",
+            {}
+        )
+
+        if league.get("slug"):
+            return league["slug"]
+
+        if league.get("name"):
+            return league["name"]
+
+        competitors = competition.get(
+            "competitors",
+            []
+        )
+
+        if competitors:
+            team = competitors[0].get(
+                "team",
+                {}
+            )
+
+            return team.get("league", "")
+
+    except Exception:
+        pass
+
+    return ""
 
 
-def estrai_squadre_evento(event):
-    competition = estrai_competizione(event)
+def estrai_squadre_evento(evento):
 
-    competitors = competition.get("competitors", [])
+    try:
+        competition = evento.get(
+            "competitions",
+            [])[0]
 
-    casa = None
-    trasferta = None
+        competitors = competition.get(
+            "competitors",
+            []
+        )
 
-    for competitor in competitors:
+        if len(competitors) < 2:
+            return None, None
 
-        if not isinstance(competitor, dict):
-            continue
+        home = None
+        away = None
 
-        home_away = competitor.get("homeAway")
+        for competitor in competitors:
 
-        if home_away == "home":
-            casa = competitor
+            home_away = competitor.get(
+                "homeAway"
+            )
 
-        elif home_away == "away":
-            trasferta = competitor
+            if home_away == "home":
+                home = competitor
 
-    return casa, trasferta
+            elif home_away == "away":
+                away = competitor
+
+        if home is None or away is None:
+            home = competitors[0]
+            away = competitors[1]
+
+        return home, away
+
+    except Exception:
+        return None, None
 
 
 def nome_squadra_competitor(competitor):
+
     if not competitor:
         return ""
 
-    team = competitor.get("team", {})
-
-    if not isinstance(team, dict):
-        return ""
+    team = competitor.get(
+        "team",
+        {}
+    )
 
     return (
         team.get("displayName")
-        or team.get("shortDisplayName")
         or team.get("name")
+        or team.get("shortDisplayName")
+        or competitor.get("displayName")
         or ""
     )
 
 
 def id_squadra_competitor(competitor):
+
     if not competitor:
-        return None
+        return ""
 
-    team = competitor.get("team", {})
+    team = competitor.get(
+        "team",
+        {}
+    )
 
-    if not isinstance(team, dict):
-        return None
-
-    value = team.get("id")
-
-    if value is None:
-        return None
-
-    return str(value)
+    return str(
+        team.get("id")
+        or competitor.get("id")
+        or ""
+    )
 
 
 def score_competitor(competitor):
+
     if not competitor:
-        return None
+        return 0
 
-    value = competitor.get("score")
+    return safe_int(
+        competitor.get("score"),
+        0
+    )
 
-    if isinstance(value, dict):
-        value = value.get("value")
 
-    if value is None:
-        return None
+def evento_completato(evento):
 
     try:
-        return int(float(value))
+        status = (
+            evento
+            .get("status", {})
+            .get("type", {})
+        )
+
+        return bool(
+            status.get("completed")
+        )
+
     except Exception:
-        return None
-
-
-def evento_completato(event):
-    status = event.get("status", {})
-
-    if not isinstance(status, dict):
         return False
 
-    status_type = status.get("type", {})
 
-    if not isinstance(status_type, dict):
-        return False
+def evento_data(evento):
 
-    if status_type.get("completed") is True:
-        return True
-
-    state = status_type.get("state", "")
-
-    return state == "post"
+    return evento.get("date")
 
 
-def evento_data(event):
-    return parse_data(event.get("date"))
+def crea_info_evento(evento):
 
+    home, away = estrai_squadre_evento(evento)
 
-def crea_info_evento(event, league_slug=None):
-    casa, trasferta = estrai_squadre_evento(event)
-
-    if not casa or not trasferta:
-        return None
-
-    nome_casa = nome_squadra_competitor(casa)
-    nome_trasferta = nome_squadra_competitor(trasferta)
-
-    if not nome_casa or not nome_trasferta:
+    if not home or not away:
         return None
 
     return {
-        "id": str(event.get("id", "")),
-        "date": evento_data(event),
-        "home": nome_casa,
-        "away": nome_trasferta,
-        "home_id": id_squadra_competitor(casa),
-        "away_id": id_squadra_competitor(trasferta),
-        "home_score": score_competitor(casa),
-        "away_score": score_competitor(trasferta),
-        "completed": evento_completato(event),
-        "league": league_slug or ""
+        "id": evento.get("id"),
+        "date": evento_data(evento),
+        "home": nome_squadra_competitor(home),
+        "away": nome_squadra_competitor(away),
+        "home_id": id_squadra_competitor(home),
+        "away_id": id_squadra_competitor(away),
+        "home_score": score_competitor(home),
+        "away_score": score_competitor(away),
+        "completed": evento_completato(evento),
+        "competition": estrai_competizione(evento)
     }
 
 
@@ -408,88 +477,145 @@ def crea_info_evento(event, league_slug=None):
 # SCOREBOARD
 # ============================================================
 
-def recupera_scoreboard(league_slug, data_inizio, data_fine):
-    key = (
-        f"scoreboard:{league_slug}:"
-        f"{data_inizio.strftime('%Y%m%d')}:"
-        f"{data_fine.strftime('%Y%m%d')}"
-    )
-
-    url = f"{ESPN_BASE}/{league_slug}/scoreboard"
-
-    params = {
-        "dates": (
-            f"{data_inizio.strftime('%Y%m%d')}-"
-            f"{data_fine.strftime('%Y%m%d')}"
-        )
-    }
-
-    data = espn_get(
-        url,
-        params=params,
-        cache_key=key
-    )
+def recupera_scoreboard(league_slug, giorni_indietro=30):
 
     risultati = []
 
-    for event in estrai_eventi(data):
-        info = crea_info_evento(
-            event,
-            league_slug
+    oggi = oggi_utc().date()
+
+    inizio = oggi - timedelta(
+        days=giorni_indietro
+    )
+
+    fine = oggi + timedelta(
+        days=GIORNI_FUTURI
+    )
+
+    giorno = inizio
+
+    while giorno <= fine:
+
+        data_str = giorno.strftime("%Y%m%d")
+
+        url = (
+            f"{ESPN_BASE}/"
+            f"{league_slug}/"
+            f"scoreboard"
         )
 
-        if info:
-            risultati.append(info)
+        data = espn_get(
+            url,
+            params={"dates": data_str},
+            cache_key=(
+                f"scoreboard:"
+                f"{league_slug}:"
+                f"{data_str}"
+            )
+        )
+
+        for evento in estrai_eventi(data):
+
+            info = crea_info_evento(evento)
+
+            if info:
+                risultati.append(info)
+
+        giorno += timedelta(days=1)
 
     return risultati
 
 
-# ============================================================
-# PARTITE FUTURE DEL CAMPIONATO
-# ============================================================
-
 def recupera_partite_future(league_slug):
-    adesso = oggi_utc()
 
-    fine = adesso + timedelta(days=GIORNI_FUTURI)
-
-    eventi = recupera_scoreboard(
-        league_slug,
-        adesso,
-        fine
+    oggi = oggi_utc().date()
+    limite = oggi + timedelta(
+        days=GIORNI_FUTURI
     )
 
-    risultati = []
+    partite = []
 
-    visti = set()
+    giorno = oggi
 
-    for evento in eventi:
+    while giorno <= limite:
 
-        event_id = evento.get("id")
+        data_str = giorno.strftime("%Y%m%d")
 
-        if event_id in visti:
-            continue
+        url = (
+            f"{ESPN_BASE}/"
+            f"{league_slug}/"
+            f"scoreboard"
+        )
 
-        visti.add(event_id)
+        data = espn_get(
+            url,
+            params={"dates": data_str},
+            cache_key=(
+                f"future:"
+                f"{league_slug}:"
+                f"{data_str}"
+            )
+        )
 
-        data = evento.get("date")
+        for evento in estrai_eventi(data):
 
-        if not data:
-            continue
+            info = crea_info_evento(evento)
 
-        if data < adesso - timedelta(minutes=30):
-            continue
+            if not info:
+                continue
 
-        if evento.get("completed"):
-            continue
+            if info["completed"]:
+                continue
 
-        risultati.append(evento)
+            data_evento = parse_data(
+                info["date"]
+            )
 
-    risultati.sort(
-        key=lambda x: x.get("date") or adesso
+            if not data_evento:
+                continue
+
+            if data_evento.date() < oggi:
+                continue
+
+            if data_evento.date() > limite:
+                continue
+
+            partite.append(info)
+
+        giorno += timedelta(days=1)
+
+    # elimina duplicati
+    uniche = {}
+
+    for partita in partite:
+        chiave = partita.get("id")
+
+        if not chiave:
+            chiave = (
+                normalizza_nome(
+                    partita["home"]
+                )
+                + "-"
+                + normalizza_nome(
+                    partita["away"]
+                )
+                + "-"
+                + str(partita["date"])
+            )
+
+        uniche[chiave] = partita
+
+    partite = list(uniche.values())
+
+    partite.sort(
+        key=lambda x: (
+            parse_data(x["date"])
+            or datetime.max.replace(
+                tzinfo=timezone.utc
+            )
+        )
     )
 
-    return risultati[:NUM_PARTITE_REPORT]
+    return partite
 
 
 # ============================================================
@@ -498,67 +624,110 @@ def recupera_partite_future(league_slug):
 
 def recupera_calendario_squadra(
     league_slug,
-    team_id
+    team_id,
+    giorni=120
 ):
+
     if not team_id:
         return []
 
-    key = (
-        f"team_schedule:"
-        f"{league_slug}:{team_id}"
-    )
-
     url = (
         f"{ESPN_BASE}/"
-        f"{league_slug}/teams/{team_id}/schedule"
+        f"{league_slug}/"
+        f"teams/"
+        f"{team_id}/"
+        f"schedule"
     )
 
     data = espn_get(
         url,
-        cache_key=key
+        cache_key=(
+            f"schedule:"
+            f"{league_slug}:"
+            f"{team_id}"
+        )
     )
+
+    eventi = estrai_eventi(data)
 
     risultati = []
 
-    for event in estrai_eventi(data):
+    limite = oggi_utc() - timedelta(
+        days=giorni
+    )
 
-        info = crea_info_evento(
-            event,
-            league_slug
-        )
+    for evento in eventi:
 
-        if info:
-            risultati.append(info)
+        info = crea_info_evento(evento)
+
+        if not info:
+            continue
+
+        dt = parse_data(info["date"])
+
+        if not dt:
+            continue
+
+        if dt < limite:
+            continue
+
+        risultati.append(info)
 
     risultati.sort(
-        key=lambda x: x.get("date") or oggi_utc()
+        key=lambda x: (
+            parse_data(x["date"])
+            or datetime.min.replace(
+                tzinfo=timezone.utc
+            )
+        ),
+        reverse=True
     )
 
     return risultati
 
 
 # ============================================================
-# FORM SQUADRA
+# FORMA
 # ============================================================
 
-def partita_di_squadra(evento, team_id):
+def partita_di_squadra(
+    partita,
+    team_id
+):
+
     team_id = str(team_id)
 
-    if str(evento.get("home_id")) == team_id:
-        return (
-            "home",
-            evento.get("home_score"),
-            evento.get("away_score"),
-            evento.get("away")
-        )
+    if str(partita["home_id"]) == team_id:
+        return {
+            "gf": partita["home_score"],
+            "gs": partita["away_score"],
+            "casa": True,
+            "data": partita["date"],
+            "vinta": (
+                partita["home_score"]
+                > partita["away_score"]
+            ),
+            "pareggiata": (
+                partita["home_score"]
+                == partita["away_score"]
+            )
+        }
 
-    if str(evento.get("away_id")) == team_id:
-        return (
-            "away",
-            evento.get("away_score"),
-            evento.get("home_score"),
-            evento.get("home")
-        )
+    if str(partita["away_id"]) == team_id:
+        return {
+            "gf": partita["away_score"],
+            "gs": partita["home_score"],
+            "casa": False,
+            "data": partita["date"],
+            "vinta": (
+                partita["away_score"]
+                > partita["home_score"]
+            ),
+            "pareggiata": (
+                partita["away_score"]
+                == partita["home_score"]
+            )
+        }
 
     return None
 
@@ -568,60 +737,35 @@ def recupera_form_squadra(
     team_id,
     numero=NUM_FORM
 ):
+
     calendario = recupera_calendario_squadra(
         league_slug,
         team_id
     )
 
-    completate = []
+    risultati = []
 
-    for evento in calendario:
+    for partita in calendario:
 
-        if not evento.get("completed"):
+        if not partita["completed"]:
             continue
 
         risultato = partita_di_squadra(
-            evento,
+            partita,
             team_id
         )
 
-        if not risultato:
-            continue
+        if risultato:
+            risultati.append(risultato)
 
-        sede, gol_fatti, gol_subiti, avversario = risultato
+        if len(risultati) >= numero:
+            break
 
-        if gol_fatti is None or gol_subiti is None:
-            continue
+    return risultati
 
-        completate.append({
-            "date": evento.get("date"),
-            "home": sede == "home",
-            "gf": gol_fatti,
-            "ga": gol_subiti,
-            "avversario": avversario,
-            "result": (
-                "V"
-                if gol_fatti > gol_subiti
-                else "P"
-                if gol_fatti == gol_subiti
-                else "S"
-            ),
-            "total_goals": gol_fatti + gol_subiti
-        })
-
-    completate.sort(
-        key=lambda x: x.get("date") or oggi_utc(),
-        reverse=True
-    )
-
-    return completate[:numero]
-
-
-# ============================================================
-# STATISTICHE FORM
-# ============================================================
 
 def calcola_statistiche_form(form):
+
     if not form:
         return {
             "partite": 0,
@@ -629,67 +773,59 @@ def calcola_statistiche_form(form):
             "pareggi": 0,
             "sconfitte": 0,
             "gf": 0,
-            "ga": 0,
-            "gf_media": 0,
-            "ga_media": 0,
+            "gs": 0,
+            "media_gf": 0,
+            "media_gs": 0,
             "punti": 0,
-            "ppg": 0,
-            "over15": 0,
-            "btts": 0,
-            "clean_sheet": 0,
-            "failed_to_score": 0,
-            "forma": ""
+            "ppp": 0,
+            "trend": "N/D"
         }
 
     vittorie = sum(
         1 for x in form
-        if x["result"] == "V"
+        if x["vinta"]
     )
 
     pareggi = sum(
         1 for x in form
-        if x["result"] == "P"
+        if x["pareggiata"]
     )
 
-    sconfitte = sum(
-        1 for x in form
-        if x["result"] == "S"
+    sconfitte = (
+        len(form)
+        - vittorie
+        - pareggi
     )
 
     gf = sum(
-        safe_int(x.get("gf"))
+        safe_int(x["gf"])
         for x in form
     )
 
-    ga = sum(
-        safe_int(x.get("ga"))
+    gs = sum(
+        safe_int(x["gs"])
         for x in form
     )
 
-    over15 = sum(
-        1 for x in form
-        if safe_int(x.get("total_goals")) >= 2
+    punti = (
+        vittorie * 3
+        + pareggi
     )
-
-    btts = sum(
-        1 for x in form
-        if safe_int(x.get("gf")) >= 1
-        and safe_int(x.get("ga")) >= 1
-    )
-
-    clean_sheet = sum(
-        1 for x in form
-        if safe_int(x.get("ga")) == 0
-    )
-
-    failed_to_score = sum(
-        1 for x in form
-        if safe_int(x.get("gf")) == 0
-    )
-
-    punti = vittorie * 3 + pareggi
 
     partite = len(form)
+
+    ppp = (
+        punti / partite
+        if partite
+        else 0
+    )
+
+    trend = "".join(
+        "V" if x["vinta"]
+        else "X" if x["pareggiata"]
+        else "P"
+        for x in reversed(form)
+    )
 
     return {
         "partite": partite,
@@ -697,1051 +833,667 @@ def calcola_statistiche_form(form):
         "pareggi": pareggi,
         "sconfitte": sconfitte,
         "gf": gf,
-        "ga": ga,
-        "gf_media": gf / partite,
-        "ga_media": ga / partite,
+        "gs": gs,
+        "media_gf": gf / partite,
+        "media_gs": gs / partite,
         "punti": punti,
-        "ppg": punti / partite,
-        "over15": over15 / partite,
-        "btts": btts / partite,
-        "clean_sheet": clean_sheet / partite,
-        "failed_to_score": failed_to_score / partite,
-        "forma": "".join(
-            x["result"] for x in form
-        )
+        "ppp": ppp,
+        "trend": trend
     }
 
 
-# ============================================================
-# SPLIT CASA / TRASFERTA
-# ============================================================
+def calcola_split(
+    form,
+    casa
+):
 
-def calcola_split(form, casa=True):
-    filtrate = [
+    split = [
         x for x in form
-        if x.get("home") is casa
+        if x["casa"] == casa
     ]
 
-    if not filtrate:
-        return None
-
     return calcola_statistiche_form(
-        filtrate
+        split
     )
 
 
 # ============================================================
-# STANDINGS
+# CLASSIFICA
 # ============================================================
 
-def estrai_stat(entry, nomi, default=0):
-    stats = entry.get("stats", [])
+def estrai_stat(team):
 
-    if not isinstance(stats, list):
-        return default
+    if not team:
+        return {}
 
-    nomi_lower = {
-        str(x).lower()
-        for x in nomi
-    }
+    stats = team.get(
+        "stats",
+        []
+    )
+
+    risultato = {}
 
     for stat in stats:
 
-        if not isinstance(stat, dict):
-            continue
+        nome = stat.get("name")
 
-        name = str(
-            stat.get("name", "")
-        ).lower()
+        valore = stat.get(
+            "value"
+        )
 
-        abbreviation = str(
-            stat.get("abbreviation", "")
-        ).lower()
-
-        if (
-            name in nomi_lower
-            or abbreviation in nomi_lower
-        ):
-            value = stat.get("value")
-
-            if value is None:
-                value = stat.get(
-                    "displayValue"
-                )
-
-            return safe_float(
-                value,
-                default
+        if nome:
+            risultato[nome] = (
+                safe_float(valore)
             )
 
-    return default
+    return risultato
 
 
-def recupera_classifica(league_slug):
-    key = f"standings:{league_slug}"
+def recupera_classifica(
+    league_slug
+):
 
     url = (
         f"{ESPN_STANDINGS_BASE}/"
-        f"{league_slug}/standings"
+        f"{league_slug}/"
+        f"standings"
     )
 
     data = espn_get(
         url,
-        cache_key=key
+        cache_key=(
+            f"standings:"
+            f"{league_slug}"
+        )
     )
 
-    risultati = []
-
-    def cerca_entries(obj):
-
-        if isinstance(obj, dict):
-
-            standings = obj.get("standings")
-
-            if isinstance(standings, dict):
-                entries = standings.get("entries")
-
-                if isinstance(entries, list):
-                    return entries
-
-            if isinstance(standings, list):
-                return standings
-
-            entries = obj.get("entries")
-
-            if isinstance(entries, list):
-                return entries
-
-            for value in obj.values():
-
-                risultato = cerca_entries(value)
-
-                if risultato:
-                    return risultato
-
-        elif isinstance(obj, list):
-
-            for item in obj:
-                risultato = cerca_entries(item)
-
-                if risultato:
-                    return risultato
-
-        return []
-
-    entries = cerca_entries(data)
-
-    for entry in entries:
-
-        if not isinstance(entry, dict):
-            continue
-
-        team = entry.get("team", {})
-
-        if not isinstance(team, dict):
-            team = {}
-
-        team_id = team.get("id")
-
-        nome = (
-            team.get("displayName")
-            or team.get("name")
-            or ""
-        )
-
-        if not team_id or not nome:
-            continue
-
-        risultati.append({
-            "id": str(team_id),
-            "nome": nome,
-            "rank": safe_int(
-                estrai_stat(
-                    entry,
-                    ["rank"],
-                    0
-                )
-            ),
-            "points": safe_float(
-                estrai_stat(
-                    entry,
-                    ["points", "pts"],
-                    0
-                )
-            ),
-            "games": safe_int(
-                estrai_stat(
-                    entry,
-                    ["gamesPlayed", "gp"],
-                    0
-                )
-            ),
-            "wins": safe_int(
-                estrai_stat(
-                    entry,
-                    ["wins", "w"],
-                    0
-                )
-            ),
-            "draws": safe_int(
-                estrai_stat(
-                    entry,
-                    ["ties", "draws", "t"],
-                    0
-                )
-            ),
-            "losses": safe_int(
-                estrai_stat(
-                    entry,
-                    ["losses", "l"],
-                    0
-                )
-            ),
-            "gf": safe_int(
-                estrai_stat(
-                    entry,
-                    ["goalsFor", "gf"],
-                    0
-                )
-            ),
-            "ga": safe_int(
-                estrai_stat(
-                    entry,
-                    ["goalsAgainst", "ga"],
-                    0
-                )
-            )
-        })
-
-    return risultati
+    return data
 
 
 def trova_classifica_squadra(
-    standings,
-    team_id
+    data,
+    team_id,
+    nome_squadra=""
 ):
-    if not standings or not team_id:
-        return None
+
+    if not data:
+        return {}
 
     team_id = str(team_id)
 
-    for item in standings:
+    def cerca(obj):
 
-        if str(item.get("id")) == team_id:
-            return item
+        if isinstance(obj, dict):
 
-    return None
+            team = obj.get("team")
+
+            if isinstance(team, dict):
+
+                tid = str(
+                    team.get("id", "")
+                )
+
+                tname = (
+                    team.get("displayName")
+                    or team.get("name")
+                    or ""
+                )
+
+                if (
+                    tid == team_id
+                    or (
+                        nome_squadra
+                        and normalizza_nome(
+                            tname
+                        )
+                        == normalizza_nome(
+                            nome_squadra
+                        )
+                    )
+                ):
+                    return obj
+
+            for valore in obj.values():
+
+                trovato = cerca(valore)
+
+                if trovato:
+                    return trovato
+
+        elif isinstance(obj, list):
+
+            for valore in obj:
+
+                trovato = cerca(valore)
+
+                if trovato:
+                    return trovato
+
+        return None
+
+    risultato = cerca(data)
+
+    if not risultato:
+        return {}
+
+    return {
+        "rank": safe_int(
+            risultato.get("rank")
+        ),
+        "team": risultato.get(
+            "team",
+            {}
+        ),
+        "stats": estrai_stat(
+            risultato
+        )
+    }
 
 
 # ============================================================
-# INFORMAZIONI SQUADRA
+# INFORTUNI
 # ============================================================
 
 def recupera_infortuni(
     league_slug,
     team_id
 ):
+
     if not team_id:
         return []
 
-    key = (
-        f"injuries:"
-        f"{league_slug}:{team_id}"
-    )
-
     url = (
         f"{ESPN_BASE}/"
-        f"{league_slug}/teams/"
-        f"{team_id}/injuries"
+        f"{league_slug}/"
+        f"teams/"
+        f"{team_id}/"
+        f"injuries"
     )
 
     data = espn_get(
         url,
-        cache_key=key
+        cache_key=(
+            f"injuries:"
+            f"{league_slug}:"
+            f"{team_id}"
+        )
     )
 
-    trovati = []
+    if isinstance(
+        data.get("injuries"),
+        list
+    ):
+        return data["injuries"]
 
-    def percorri(obj):
+    return []
 
-        if isinstance(obj, dict):
 
-            if (
-                "athlete" in obj
-                or "player" in obj
-            ):
-                trovati.append(obj)
+def analizza_infortuni(
+    injuries
+):
 
-            for value in obj.values():
-                percorri(value)
+    importanti = 0
 
-        elif isinstance(obj, list):
+    for item in injuries:
 
-            for item in obj:
-                percorri(item)
-
-    percorri(data)
-
-    unici = {}
-    sospesi = 0
-
-    for item in trovati:
-
-        athlete = (
-            item.get("athlete")
-            or item.get("player")
-            or {}
-        )
-
-        if not isinstance(athlete, dict):
-            athlete = {}
-
-        athlete_id = (
-            athlete.get("id")
-            or athlete.get("displayName")
-            or athlete.get("fullName")
-            or athlete.get("shortName")
-        )
-
-        if not athlete_id:
-            continue
-
-        nome = (
-            athlete.get("displayName")
-            or athlete.get("fullName")
-            or athlete.get("shortName")
-            or "Giocatore"
-        )
-
-        testo = json.dumps(
-            item,
-            ensure_ascii=False
+        status = str(
+            item.get(
+                "status",
+                ""
+            )
         ).lower()
 
-        is_sospeso = (
-            "suspension" in testo
-            or "suspended" in testo
-            or "squalific" in testo
-        )
-
-        unici[str(athlete_id)] = {
-            "nome": nome,
-            "sospeso": is_sospeso
-        }
-
-    for item in unici.values():
-
-        if item["sospeso"]:
-            sospesi += 1
-
-    return [
-        {
-            **item,
-            "id": key
-        }
-        for key, item in unici.items()
-    ]
-
-
-def analizza_infortuni(infortuni):
-    if not infortuni:
-        return {
-            "totale": 0,
-            "sospesi": 0,
-            "peso": 0
-        }
-
-    totale = len(infortuni)
-
-    sospesi = sum(
-        1
-        for x in infortuni
-        if x.get("sospeso")
-    )
-
-    peso = min(
-        6.0,
-        totale * 0.8
-        + sospesi * 0.8
-    )
+        if any(
+            parola in status
+            for parola in (
+                "out",
+                "injured",
+                "doubt"
+            )
+        ):
+            importanti += 1
 
     return {
-        "totale": totale,
-        "sospesi": sospesi,
-        "peso": peso
+        "totale": len(injuries),
+        "importanti": importanti
     }
 
 
 # ============================================================
-# H2H
+# HEAD TO HEAD
 # ============================================================
 
 def recupera_h2h(
     league_slug,
-    team_id,
-    opponent_id
+    home_id,
+    away_id
 ):
-    if not team_id or not opponent_id:
+
+    if not home_id or not away_id:
         return []
 
     calendario = recupera_calendario_squadra(
         league_slug,
-        team_id
+        home_id,
+        giorni=1000
     )
 
-    risultati = []
+    h2h = []
 
-    for evento in calendario:
+    for partita in calendario:
 
-        if not evento.get("completed"):
-            continue
+        ids = {
+            str(partita["home_id"]),
+            str(partita["away_id"])
+        }
 
         if (
-            str(evento.get("home_id")) == str(opponent_id)
-            or
-            str(evento.get("away_id")) == str(opponent_id)
+            str(home_id) in ids
+            and str(away_id) in ids
+            and partita["completed"]
         ):
-            risultati.append(evento)
+            h2h.append(partita)
 
-    risultati.sort(
-        key=lambda x: x.get("date") or oggi_utc(),
+    h2h.sort(
+        key=lambda x: (
+            parse_data(x["date"])
+            or datetime.min.replace(
+                tzinfo=timezone.utc
+            )
+        ),
         reverse=True
     )
 
-    return risultati[:5]
+    return h2h[:5]
 
 
 def calcola_h2h(
     h2h,
-    team_id
+    home_id
 ):
-    if not h2h:
-        return {
-            "partite": 0,
-            "vittorie": 0,
-            "pareggi": 0,
-            "sconfitte": 0
-        }
 
-    vittorie = 0
-    pareggi = 0
-    sconfitte = 0
+    risultato = {
+        "partite": 0,
+        "home_vittorie": 0,
+        "pareggi": 0,
+        "away_vittorie": 0,
+        "gol_home": 0,
+        "gol_away": 0
+    }
 
-    for evento in h2h:
+    for partita in h2h:
 
-        risultato = partita_di_squadra(
-            evento,
-            team_id
+        risultato["partite"] += 1
+
+        if (
+            str(partita["home_id"])
+            == str(home_id)
+        ):
+            gf = partita["home_score"]
+            gs = partita["away_score"]
+
+            risultato["gol_home"] += gf
+            risultato["gol_away"] += gs
+
+            if gf > gs:
+                risultato["home_vittorie"] += 1
+            elif gf == gs:
+                risultato["pareggi"] += 1
+            else:
+                risultato["away_vittorie"] += 1
+
+        else:
+            gf = partita["away_score"]
+            gs = partita["home_score"]
+
+            risultato["gol_home"] += gf
+            risultato["gol_away"] += gs
+
+            if gf > gs:
+                risultato["away_vittorie"] += 1
+            elif gf == gs:
+                risultato["pareggi"] += 1
+            else:
+                risultato["home_vittorie"] += 1
+
+    return risultato
+
+
+# ============================================================
+# COMPETIZIONI EUROPEE E FATICA
+# ============================================================
+
+def recupera_eventi_europei_squadra(
+    team_id,
+    giorni=30
+):
+
+    if not team_id:
+        return []
+
+    risultati = []
+
+    for slug in COMPETIZIONI_EUROPEE:
+
+        url = (
+            f"{ESPN_BASE}/"
+            f"{slug}/"
+            f"scoreboard"
         )
 
-        if not risultato:
-            continue
+        data = espn_get(
+            url,
+            cache_key=(
+                f"europe:"
+                f"{slug}"
+            )
+        )
 
-        _, gf, ga, _ = risultato
+        for evento in estrai_eventi(data):
 
-        if gf > ga:
-            vittorie += 1
-        elif gf == ga:
-            pareggi += 1
-        else:
-            sconfitte += 1
+            home, away = (
+                estrai_squadre_evento(
+                    evento
+                )
+            )
+
+            if not home or not away:
+                continue
+
+            ids = {
+                id_squadra_competitor(
+                    home
+                ),
+                id_squadra_competitor(
+                    away
+                )
+            }
+
+            if str(team_id) not in ids:
+                continue
+
+            info = crea_info_evento(
+                evento
+            )
+
+            if info:
+                risultati.append(
+                    info
+                )
+
+    limite = oggi_utc() - timedelta(
+        days=giorni
+    )
+
+    return [
+        x for x in risultati
+        if (
+            parse_data(x["date"])
+            and parse_data(x["date"]) >= limite
+        )
+    ]
+
+
+def analizza_fatica(
+    league_slug,
+    team_id
+):
+
+    calendario = recupera_calendario_squadra(
+        league_slug,
+        team_id,
+        giorni=30
+    )
+
+    completate = [
+        x for x in calendario
+        if x["completed"]
+    ]
+
+    europee = recupera_eventi_europei_squadra(
+        team_id,
+        giorni=30
+    )
+
+    adesso = oggi_utc()
+
+    ultime = []
+
+    for partita in completate:
+
+        dt = parse_data(
+            partita["date"]
+        )
+
+        if dt:
+            giorni = (
+                adesso - dt
+            ).total_seconds() / 86400
+
+            ultime.append(giorni)
+
+    ultima = (
+        min(ultime)
+        if ultime
+        else 999
+    )
+
+    partite_14 = 0
+
+    limite = adesso - timedelta(
+        days=14
+    )
+
+    for partita in completate:
+
+        dt = parse_data(
+            partita["date"]
+        )
+
+        if dt and dt >= limite:
+            partite_14 += 1
+
+    europee_recenti = 0
+
+    for partita in europee:
+
+        dt = parse_data(
+            partita["date"]
+        )
+
+        if dt and dt >= limite:
+            europee_recenti += 1
+
+    if ultima < 3:
+        livello = "ALTA"
+    elif ultima < 5:
+        livello = "MEDIA"
+    else:
+        livello = "BASSA"
+
+    if partite_14 >= 6:
+        livello = "MOLTO ALTA"
 
     return {
-        "partite": len(h2h),
+        "giorni_riposo": round(
+            ultima,
+            1
+        ),
+        "partite_14_giorni": partite_14,
+        "europee_recenti": europee_recenti,
+        "livello": livello
+    }
+
+
+# ============================================================
+# MOMENTUM
+# ============================================================
+
+def analizza_momento(
+    statistiche
+):
+
+    ppp = statistiche.get(
+        "ppp",
+        0
+    )
+
+    vittorie = statistiche.get(
+        "vittorie",
+        0
+    )
+
+    sconfitte = statistiche.get(
+        "sconfitte",
+        0
+    )
+
+    if ppp >= 2.2:
+        livello = "MOLTO POSITIVO"
+
+    elif ppp >= 1.6:
+        livello = "POSITIVO"
+
+    elif ppp >= 1.0:
+        livello = "NEUTRO"
+
+    elif ppp >= 0.7:
+        livello = "NEGATIVO"
+
+    else:
+        livello = "MOLTO NEGATIVO"
+
+    return {
+        "livello": livello,
+        "ppp": ppp,
         "vittorie": vittorie,
-        "pareggi": pareggi,
         "sconfitte": sconfitte
     }
 
 
 # ============================================================
-# FATICA / CALENDARIO EUROPEO
-# ============================================================
-
-def recupera_eventi_europei_squadra(
-    team_id,
-    data_centro
-):
-    if not team_id:
-        return []
-
-    risultati = []
-
-    for league_slug in COMPETIZIONI_EUROPEE:
-
-        calendario = recupera_calendario_squadra(
-            league_slug,
-            team_id
-        )
-
-        for evento in calendario:
-
-            data = evento.get("date")
-
-            if not data:
-                continue
-
-            if (
-                data >= data_centro - timedelta(days=21)
-                and
-                data <= data_centro + timedelta(days=21)
-            ):
-                risultati.append(evento)
-
-    return risultati
-
-
-def analizza_fatica(
-    league_slug,
-    team_id,
-    data_partita
-):
-    calendario = recupera_calendario_squadra(
-        league_slug,
-        team_id
-    )
-
-    if not calendario:
-        return {
-            "score": 0,
-            "riposo": None,
-            "partite_7": 0,
-            "partite_14": 0,
-            "europea_vicina": False
-        }
-
-    passate = []
-
-    for evento in calendario:
-
-        if not evento.get("completed"):
-            continue
-
-        data = evento.get("date")
-
-        if not data:
-            continue
-
-        if data < data_partita:
-            passate.append(evento)
-
-    passate.sort(
-        key=lambda x: x.get("date") or data_partita,
-        reverse=True
-    )
-
-    score = 0
-
-    partite_7 = 0
-    partite_14 = 0
-
-    for evento in passate:
-
-        data = evento.get("date")
-
-        if not data:
-            continue
-
-        giorni = (
-            data_partita - data
-        ).total_seconds() / 86400
-
-        if giorni <= 7:
-            partite_7 += 1
-
-        if giorni <= 14:
-            partite_14 += 1
-
-    riposo = None
-
-    if passate:
-
-        ultima = passate[0].get("date")
-
-        if ultima:
-            riposo = (
-                data_partita - ultima
-            ).total_seconds() / 86400
-
-            if riposo < 2:
-                score += 20
-            elif riposo < 3:
-                score += 14
-            elif riposo < 4:
-                score += 7
-
-    if partite_7 >= 3:
-        score += 12
-
-    if partite_14 >= 5:
-        score += 10
-
-    europee = recupera_eventi_europei_squadra(
-        team_id,
-        data_partita
-    )
-
-    europea_vicina = False
-
-    for evento in europee:
-
-        data = evento.get("date")
-
-        if not data:
-            continue
-
-        differenza = abs(
-            (
-                data - data_partita
-            ).total_seconds()
-        ) / 86400
-
-        if differenza <= 5:
-            europea_vicina = True
-            score += 8
-            break
-
-    return {
-        "score": min(score, 40),
-        "riposo": riposo,
-        "partite_7": partite_7,
-        "partite_14": partite_14,
-        "europea_vicina": europea_vicina
-    }
-
-
-# ============================================================
-# MOMENTO / MOTIVAZIONE MISURABILE
-# ============================================================
-
-def analizza_momento(stats):
-    if not stats or stats["partite"] == 0:
-        return 0
-
-    score = 0
-
-    ppg = stats["ppg"]
-
-    if ppg >= 2.2:
-        score += 12
-    elif ppg >= 1.7:
-        score += 7
-    elif ppg >= 1.3:
-        score += 3
-    elif ppg < 0.9:
-        score -= 8
-
-    if stats["gf_media"] >= 1.8:
-        score += 6
-
-    if stats["ga_media"] <= 0.9:
-        score += 6
-
-    if stats["clean_sheet"] >= 0.4:
-        score += 4
-
-    if stats["failed_to_score"] >= 0.5:
-        score -= 6
-
-    return max(-15, min(20, score))
-
-
-# ============================================================
-# PROBABILITA'
+# PROBABILITÀ
 # ============================================================
 
 def probabilita_da_forze(
-    casa,
-    trasferta,
-    class_casa=None,
-    class_trasferta=None,
-    fatica_casa=None,
-    fatica_trasferta=None,
-    infortuni_casa=None,
-    infortuni_trasferta=None,
-    h2h_casa=None
+    forza_home,
+    forza_away
 ):
-    forza_casa = 0.0
-    forza_trasferta = 0.0
-
-    # --------------------------------------------------------
-    # FORM
-    # --------------------------------------------------------
-
-    forza_casa += (
-        casa["ppg"] * 12
-        + casa["gf_media"] * 5
-        - casa["ga_media"] * 4
-    )
-
-    forza_trasferta += (
-        trasferta["ppg"] * 12
-        + trasferta["gf_media"] * 5
-        - trasferta["ga_media"] * 4
-    )
-
-    # --------------------------------------------------------
-    # VANTAGGIO CASA
-    # --------------------------------------------------------
-
-    forza_casa += 5
-
-    # --------------------------------------------------------
-    # MOMENTO
-    # --------------------------------------------------------
-
-    forza_casa += analizza_momento(casa)
-    forza_trasferta += analizza_momento(trasferta)
-
-    # --------------------------------------------------------
-    # CLASSIFICA
-    # --------------------------------------------------------
-
-    if class_casa and class_trasferta:
-
-        rank_casa = safe_int(
-            class_casa.get("rank"),
-            0
-        )
-
-        rank_trasferta = safe_int(
-            class_trasferta.get("rank"),
-            0
-        )
-
-        if rank_casa > 0 and rank_trasferta > 0:
-
-            differenza = rank_trasferta - rank_casa
-
-            forza_casa += max(
-                -8,
-                min(8, differenza * 0.7)
-            )
-
-    # --------------------------------------------------------
-    # FATICA
-    # --------------------------------------------------------
-
-    if fatica_casa:
-        forza_casa -= (
-            fatica_casa.get("score", 0) * 0.20
-        )
-
-    if fatica_trasferta:
-        forza_trasferta -= (
-            fatica_trasferta.get("score", 0) * 0.20
-        )
-
-    # --------------------------------------------------------
-    # INFORTUNI
-    # --------------------------------------------------------
-
-    if infortuni_casa:
-        forza_casa -= (
-            infortuni_casa.get("peso", 0)
-        )
-
-    if infortuni_trasferta:
-        forza_trasferta -= (
-            infortuni_trasferta.get("peso", 0)
-        )
-
-    # --------------------------------------------------------
-    # H2H
-    # --------------------------------------------------------
-
-    if h2h_casa:
-        partite = h2h_casa.get("partite", 0)
-
-        if partite > 0:
-
-            vittorie = h2h_casa.get(
-                "vittorie",
-                0
-            )
-
-            sconfitte = h2h_casa.get(
-                "sconfitte",
-                0
-            )
-
-            forza_casa += (
-                vittorie - sconfitte
-            ) * 1.5
-
-    # --------------------------------------------------------
-    # NORMALIZZAZIONE
-    # --------------------------------------------------------
 
     totale = (
-        abs(forza_casa)
-        + abs(forza_trasferta)
-        + 30
+        forza_home
+        + forza_away
     )
 
-    differenza = (
-        forza_casa - forza_trasferta
+    if totale <= 0:
+        return 33.3, 33.3, 33.4
+
+    base_home = (
+        forza_home / totale
     )
 
-    p_casa = 0.333 + differenza / totale
-    p_trasferta = 0.333 - differenza / totale
-
-    p_casa = max(0.08, min(0.80, p_casa))
-    p_trasferta = max(0.08, min(0.80, p_trasferta))
-
-    p_x = 1 - p_casa - p_trasferta
-
-    p_x = max(0.10, min(0.45, p_x))
-
-    totale_prob = (
-        p_casa
-        + p_x
-        + p_trasferta
+    base_away = (
+        forza_away / totale
     )
 
-    p_casa /= totale_prob
-    p_x /= totale_prob
-    p_trasferta /= totale_prob
+    pareggio = 0.27
 
-    return {
-        "1": p_casa,
-        "X": p_x,
-        "2": p_trasferta
-    }
+    p_home = (
+        base_home
+        * (1 - pareggio)
+    )
 
+    p_away = (
+        base_away
+        * (1 - pareggio)
+    )
 
-# ============================================================
-# PRONOSTICO OVER / BTTS
-# ============================================================
+    return (
+        p_home * 100,
+        pareggio * 100,
+        p_away * 100
+    )
+
 
 def calcola_goal_probabilita(
-    casa,
-    trasferta
+    home_stats,
+    away_stats,
+    home_split,
+    away_split
 ):
-    media_gol = (
-        casa["gf_media"]
-        + casa["ga_media"]
-        + trasferta["gf_media"]
-        + trasferta["ga_media"]
+
+    home_gf = (
+        home_stats["media_gf"]
+        + home_split["media_gf"]
     ) / 2
 
-    over15 = (
-        casa["over15"]
-        + trasferta["over15"]
+    away_gf = (
+        away_stats["media_gf"]
+        + away_split["media_gf"]
     ) / 2
 
-    btts = (
-        casa["btts"]
-        + trasferta["btts"]
+    home_gs = (
+        home_stats["media_gs"]
+        + home_split["media_gs"]
     ) / 2
 
-    # Correzione leggera basata sui gol medi
-    over15 = (
-        over15 * 0.65
-        + min(0.95, media_gol / 2.4) * 0.35
+    away_gs = (
+        away_stats["media_gs"]
+        + away_split["media_gs"]
+    ) / 2
+
+    expected_home = (
+        home_gf * 0.60
+        + away_gs * 0.40
     )
 
-    btts = (
-        btts * 0.70
-        + min(
-            0.90,
-            (
-                casa["gf_media"]
-                + trasferta["gf_media"]
-            ) / 3.0
-        ) * 0.30
+    expected_away = (
+        away_gf * 0.60
+        + home_gs * 0.40
     )
 
-    over15 = max(
-        0.35,
-        min(0.95, over15)
+    expected_total = (
+        expected_home
+        + expected_away
     )
 
-    btts = max(
-        0.25,
-        min(0.90, btts)
+    # Stima prudente delle probabilità
+    over15 = min(
+        95,
+        max(
+            25,
+            45 + expected_total * 18
+        )
     )
 
-    return over15, btts
-
-
-# ============================================================
-# GENERAZIONE PRONOSTICO
-# ============================================================
-
-def genera_pronostico_avanzato(
-    dati_casa,
-    dati_trasferta
-):
-    prob = probabilita_da_forze(
-        dati_casa["form"],
-        dati_trasferta["form"],
-        dati_casa.get("classifica"),
-        dati_trasferta.get("classifica"),
-        dati_casa.get("fatica"),
-        dati_trasferta.get("fatica"),
-        dati_casa.get("infortuni"),
-        dati_trasferta.get("infortuni"),
-        dati_casa.get("h2h")
+    over25 = min(
+        90,
+        max(
+            15,
+            25 + expected_total * 17
+        )
     )
 
-    p1 = prob["1"]
-    px = prob["X"]
-    p2 = prob["2"]
-
-    if p1 >= p2:
-        segno_principale = "1"
-        p_principale = p1
-        altro = px
-    else:
-        segno_principale = "2"
-        p_principale = p2
-        altro = px
-
-    # --------------------------------------------------------
-    # DOPPIA CHANCE
-    # --------------------------------------------------------
-
-    if p1 >= p2:
-
-        if p1 + px >= 0.67:
-            doppia_chance = "1X"
-        else:
-            doppia_chance = "X2"
-
-    else:
-
-        if p2 + px >= 0.67:
-            doppia_chance = "X2"
-        else:
-            doppia_chance = "1X"
-
-    # --------------------------------------------------------
-    # OVER / BTTS
-    # --------------------------------------------------------
-
-    over15, btts = calcola_goal_probabilita(
-        dati_casa["form"],
-        dati_trasferta["form"]
+    btts = min(
+        90,
+        max(
+            15,
+            20
+            + min(
+                expected_home,
+                expected_away
+            ) * 30
+        )
     )
-
-    pronostico_over = (
-        "OVER 1.5"
-        if over15 >= 0.58
-        else "UNDER 1.5"
-    )
-
-    pronostico_btts = (
-        "GOL"
-        if btts >= 0.56
-        else "NO GOL"
-    )
-
-    # --------------------------------------------------------
-    # AFFIDABILITA'
-    # --------------------------------------------------------
-
-    affidabilita = 55
-
-    differenza = abs(p1 - p2)
-
-    affidabilita += int(
-        min(15, differenza * 45)
-    )
-
-    if dati_casa["form"]["partite"] >= 5:
-        affidabilita += 5
-
-    if dati_trasferta["form"]["partite"] >= 5:
-        affidabilita += 5
-
-    if (
-        dati_casa.get("classifica")
-        and dati_trasferta.get("classifica")
-    ):
-        affidabilita += 4
-
-    if (
-        dati_casa.get("fatica", {}).get("score", 0)
-        >= 20
-    ):
-        affidabilita -= 2
-
-    if (
-        dati_trasferta.get("fatica", {}).get("score", 0)
-        >= 20
-    ):
-        affidabilita -= 2
-
-    # Dati insufficienti
-    if (
-        dati_casa["form"]["partite"] < 3
-        or dati_trasferta["form"]["partite"] < 3
-    ):
-        affidabilita -= 12
-
-    affidabilita = max(
-        50,
-        min(86, affidabilita)
-    )
-
-    # --------------------------------------------------------
-    # PRONOSTICO MIGLIORE
-    # --------------------------------------------------------
-
-    if (
-        p1 + px >= 0.68
-        and p1 >= p2
-    ):
-        migliore = "1X"
-
-    elif (
-        p2 + px >= 0.68
-        and p2 > p1
-    ):
-        migliore = "X2"
-
-    elif p1 >= 0.56:
-        migliore = "1"
-
-    elif p2 >= 0.56:
-        migliore = "2"
-
-    else:
-        migliore = doppia_chance
 
     return {
-        "probabilita": prob,
-        "migliore": migliore,
-        "over": pronostico_over,
-        "btts": pronostico_btts,
-        "affidabilita": affidabilita,
-        "over_prob": over15,
-        "btts_prob": btts
+        "expected_home": expected_home,
+        "expected_away": expected_away,
+        "expected_total": expected_total,
+        "over15": over15,
+        "over25": over25,
+        "btts": btts
     }
-
-
-# ============================================================
-# FORMATTA REPORT
-# ============================================================
-
-def formatta_pronostico(
-    partita,
-    pronostico
-):
-    return (
-        f"⚽ <b>{partita['home']} - "
-        f"{partita['away']}</b>\n\n"
-
-        f"🔮 <b>PRONOSTICO MIGLIORE</b>\n"
-        f"{pronostico['migliore']}\n\n"
-
-        f"📈 <b>{pronostico['over']}</b>\n"
-        f"⚽ <b>{pronostico['btts']}</b>\n\n"
-
-        f"🎯 <b>AFFIDABILITÀ: "
-        f"{pronostico['affidabilita']}%</b>"
-    )
 
 
 # ============================================================
@@ -1752,36 +1504,58 @@ def analizza_partita(
     partita,
     league_slug
 ):
-    home_id = partita.get("home_id")
-    away_id = partita.get("away_id")
-    data_partita = partita.get("date")
 
-    if not home_id or not away_id:
-        return None
+    home = partita["home"]
+    away = partita["away"]
 
-    if not data_partita:
-        return None
+    home_id = partita["home_id"]
+    away_id = partita["away_id"]
+
+    print(
+        f"   📊 Raccolta dati: {home} "
+        f"vs {away}"
+    )
 
     # --------------------------------------------------------
-    # FORM
+    # FORMA
     # --------------------------------------------------------
 
-    form_casa_lista = recupera_form_squadra(
+    home_form = recupera_form_squadra(
         league_slug,
         home_id
     )
 
-    form_trasferta_lista = recupera_form_squadra(
+    away_form = recupera_form_squadra(
         league_slug,
         away_id
     )
 
-    form_casa = calcola_statistiche_form(
-        form_casa_lista
+    home_stats = calcola_statistiche_form(
+        home_form
     )
 
-    form_trasferta = calcola_statistiche_form(
-        form_trasferta_lista
+    away_stats = calcola_statistiche_form(
+        away_form
+    )
+
+    print(
+        f"   📈 Forma: "
+        f"{home_stats['trend']} - "
+        f"{away_stats['trend']}"
+    )
+
+    # --------------------------------------------------------
+    # CASA / TRASFERTA
+    # --------------------------------------------------------
+
+    home_split = calcola_split(
+        home_form,
+        True
+    )
+
+    away_split = calcola_split(
+        away_form,
+        False
     )
 
     # --------------------------------------------------------
@@ -1792,130 +1566,589 @@ def analizza_partita(
         league_slug
     )
 
-    class_casa = trova_classifica_squadra(
+    home_table = trova_classifica_squadra(
         standings,
-        home_id
+        home_id,
+        home
     )
 
-    class_trasferta = trova_classifica_squadra(
+    away_table = trova_classifica_squadra(
         standings,
-        away_id
+        away_id,
+        away
+    )
+
+    home_rank = home_table.get(
+        "rank",
+        0
+    )
+
+    away_rank = away_table.get(
+        "rank",
+        0
     )
 
     # --------------------------------------------------------
     # INFORTUNI
     # --------------------------------------------------------
 
-    infortuni_casa_raw = recupera_infortuni(
-        league_slug,
-        home_id
+    home_injuries = analizza_infortuni(
+        recupera_infortuni(
+            league_slug,
+            home_id
+        )
     )
 
-    infortuni_trasferta_raw = recupera_infortuni(
-        league_slug,
-        away_id
-    )
-
-    infortuni_casa = analizza_infortuni(
-        infortuni_casa_raw
-    )
-
-    infortuni_trasferta = analizza_infortuni(
-        infortuni_trasferta_raw
+    away_injuries = analizza_infortuni(
+        recupera_infortuni(
+            league_slug,
+            away_id
+        )
     )
 
     # --------------------------------------------------------
     # FATICA
     # --------------------------------------------------------
 
-    fatica_casa = analizza_fatica(
+    home_fatigue = analizza_fatica(
         league_slug,
-        home_id,
-        data_partita
+        home_id
     )
 
-    fatica_trasferta = analizza_fatica(
+    away_fatigue = analizza_fatica(
         league_slug,
-        away_id,
-        data_partita
+        away_id
     )
 
     # --------------------------------------------------------
     # H2H
     # --------------------------------------------------------
 
-    h2h_casa_raw = recupera_h2h(
+    h2h = recupera_h2h(
         league_slug,
         home_id,
         away_id
     )
 
-    h2h_casa = calcola_h2h(
-        h2h_casa_raw,
+    h2h_stats = calcola_h2h(
+        h2h,
         home_id
     )
 
     # --------------------------------------------------------
-    # DATI COMPLETI
+    # MOMENTUM
     # --------------------------------------------------------
 
-    dati_casa = {
-        "form": form_casa,
-        "classifica": class_casa,
-        "fatica": fatica_casa,
-        "infortuni": infortuni_casa,
-        "h2h": h2h_casa
-    }
-
-    dati_trasferta = {
-        "form": form_trasferta,
-        "classifica": class_trasferta,
-        "fatica": fatica_trasferta,
-        "infortuni": infortuni_trasferta
-    }
-
-    # --------------------------------------------------------
-    # PRONOSTICO
-    # --------------------------------------------------------
-
-    pronostico = genera_pronostico_avanzato(
-        dati_casa,
-        dati_trasferta
+    home_momentum = analizza_momento(
+        home_stats
     )
 
-    return pronostico
+    away_momentum = analizza_momento(
+        away_stats
+    )
+
+    # --------------------------------------------------------
+    # FORZA SQUADRE
+    # --------------------------------------------------------
+
+    forza_home = 1.0
+    forza_away = 1.0
+
+    # Forma
+    forza_home += (
+        home_stats["ppp"] - 1
+    ) * 0.35
+
+    forza_away += (
+        away_stats["ppp"] - 1
+    ) * 0.35
+
+    # Casa
+    forza_home += 0.18
+
+    # Gol
+    forza_home += (
+        home_stats["media_gf"]
+        - home_stats["media_gs"]
+    ) * 0.12
+
+    forza_away += (
+        away_stats["media_gf"]
+        - away_stats["media_gs"]
+    ) * 0.12
+
+    # Classifica
+    if home_rank and away_rank:
+
+        differenza_classifica = (
+            away_rank
+            - home_rank
+        )
+
+        forza_home += (
+            differenza_classifica
+            * 0.015
+        )
+
+        forza_away -= (
+            differenza_classifica
+            * 0.015
+        )
+
+    # Infortuni
+    forza_home -= (
+        home_injuries["importanti"]
+        * 0.025
+    )
+
+    forza_away -= (
+        away_injuries["importanti"]
+        * 0.025
+    )
+
+    # Fatica
+    if home_fatigue["livello"] in (
+        "ALTA",
+        "MOLTO ALTA"
+    ):
+        forza_home -= 0.07
+
+    if away_fatigue["livello"] in (
+        "ALTA",
+        "MOLTO ALTA"
+    ):
+        forza_away -= 0.07
+
+    forza_home = max(
+        0.10,
+        forza_home
+    )
+
+    forza_away = max(
+        0.10,
+        forza_away
+    )
+
+    # --------------------------------------------------------
+    # 1X2
+    # --------------------------------------------------------
+
+    p_home, p_draw, p_away = (
+        probabilita_da_forze(
+            forza_home,
+            forza_away
+        )
+    )
+
+    # --------------------------------------------------------
+    # GOAL
+    # --------------------------------------------------------
+
+    goal = calcola_goal_probabilita(
+        home_stats,
+        away_stats,
+        home_split,
+        away_split
+    )
+
+    # --------------------------------------------------------
+    # H2H CORREZIONE
+    # --------------------------------------------------------
+
+    if h2h_stats["partite"] >= 3:
+
+        if (
+            h2h_stats["home_vittorie"]
+            >= h2h_stats["away_vittorie"]
+            + 2
+        ):
+            p_home += 3
+            p_away -= 2
+            p_draw -= 1
+
+        elif (
+            h2h_stats["away_vittorie"]
+            >= h2h_stats["home_vittorie"]
+            + 2
+        ):
+            p_away += 3
+            p_home -= 2
+            p_draw -= 1
+
+    # normalizzazione
+    totale = (
+        p_home
+        + p_draw
+        + p_away
+    )
+
+    if totale > 0:
+
+        p_home = (
+            p_home / totale * 100
+        )
+
+        p_draw = (
+            p_draw / totale * 100
+        )
+
+        p_away = (
+            p_away / totale * 100
+        )
+
+    # --------------------------------------------------------
+    # PRONOSTICO PRINCIPALE
+    # --------------------------------------------------------
+
+    probabilita = {
+        "1": p_home,
+        "X": p_draw,
+        "2": p_away
+    }
+
+    segno = max(
+        probabilita,
+        key=probabilita.get
+    )
+
+    prob_segno = probabilita[
+        segno
+    ]
+
+    # Doppia chance
+    if p_home >= p_away:
+        doppia_chance = "1X"
+        prob_dc = p_home + p_draw
+    else:
+        doppia_chance = "X2"
+        prob_dc = p_away + p_draw
+
+    # Over / Under
+    if goal["over25"] >= 62:
+        over_under = "Over 2.5"
+        prob_ou = goal["over25"]
+    else:
+        over_under = "Under 3.5"
+        prob_ou = 100 - min(
+            80,
+            goal["over25"] * 0.75
+        )
+
+    # BTTS
+    if goal["btts"] >= 60:
+        btts = "Goal"
+        prob_btts = goal["btts"]
+    else:
+        btts = "No Goal"
+        prob_btts = 100 - goal["btts"]
+
+    # --------------------------------------------------------
+    # PUNTEGGIO AFFIDABILITÀ
+    # --------------------------------------------------------
+
+    fattori = []
+
+    fattori.append(
+        min(
+            100,
+            max(
+                0,
+                prob_segno
+            )
+        )
+    )
+
+    fattori.append(
+        min(
+            100,
+            max(
+                0,
+                prob_dc
+            )
+        )
+    )
+
+    fattori.append(
+        min(
+            100,
+            max(
+                0,
+                prob_ou
+            )
+        )
+    )
+
+    fattori.append(
+        min(
+            100,
+            max(
+                0,
+                prob_btts
+            )
+        )
+    )
+
+    affidabilita = (
+        sum(fattori)
+        / len(fattori)
+    )
+
+    # Penalità per pochi dati
+    if (
+        home_stats["partite"] < 5
+        or away_stats["partite"] < 5
+    ):
+        affidabilita -= 5
+
+    # Penalità per forte fatica
+    if (
+        home_fatigue["livello"]
+        == "MOLTO ALTA"
+        or
+        away_fatigue["livello"]
+        == "MOLTO ALTA"
+    ):
+        affidabilita -= 3
+
+    affidabilita = min(
+        95,
+        max(
+            50,
+            affidabilita
+        )
+    )
+
+    return {
+        "segno": segno,
+        "prob_1": p_home,
+        "prob_x": p_draw,
+        "prob_2": p_away,
+
+        "doppia_chance": doppia_chance,
+        "prob_dc": prob_dc,
+
+        "over_under": over_under,
+        "prob_ou": prob_ou,
+
+        "btts": btts,
+        "prob_btts": prob_btts,
+
+        "affidabilita": affidabilita,
+
+        "expected_home": goal[
+            "expected_home"
+        ],
+        "expected_away": goal[
+            "expected_away"
+        ],
+
+        "home_stats": home_stats,
+        "away_stats": away_stats,
+
+        "home_split": home_split,
+        "away_split": away_split,
+
+        "home_rank": home_rank,
+        "away_rank": away_rank,
+
+        "home_injuries": home_injuries,
+        "away_injuries": away_injuries,
+
+        "home_fatigue": home_fatigue,
+        "away_fatigue": away_fatigue,
+
+        "home_momentum": home_momentum,
+        "away_momentum": away_momentum,
+
+        "h2h": h2h_stats
+    }
 
 
 # ============================================================
-# REPORT CAMPIONATO
+# FORMATTAZIONE PRONOSTICO
+# ============================================================
+
+def formatta_pronostico(
+    partita,
+    pronostico
+):
+
+    home = partita["home"]
+    away = partita["away"]
+
+    data = format_data_italiana(
+        partita["date"]
+    )
+
+    segno = pronostico["segno"]
+
+    if segno == "1":
+        esito = (
+            f"1 — {pronostico['prob_1']:.0f}%"
+        )
+    elif segno == "2":
+        esito = (
+            f"2 — {pronostico['prob_2']:.0f}%"
+        )
+    else:
+        esito = (
+            f"X — {pronostico['prob_x']:.0f}%"
+        )
+
+    hs = pronostico["home_stats"]
+    aws = pronostico["away_stats"]
+
+    hf = pronostico["home_fatigue"]
+    af = pronostico["away_fatigue"]
+
+    hm = pronostico["home_momentum"]
+    am = pronostico["away_momentum"]
+
+    hi = pronostico["home_injuries"]
+    ai = pronostico["away_injuries"]
+
+    testo = (
+        f"⚽ <b>{home} - {away}</b>\n"
+        f"📅 {data}\n\n"
+
+        f"🎯 <b>PRONOSTICO PRINCIPALE</b>\n"
+        f"➡️ {esito}\n"
+        f"➡️ Doppia chance: "
+        f"<b>{pronostico['doppia_chance']}</b> "
+        f"({pronostico['prob_dc']:.0f}%)\n"
+        f"➡️ {pronostico['over_under']} "
+        f"({pronostico['prob_ou']:.0f}%)\n"
+        f"➡️ {pronostico['btts']} "
+        f"({pronostico['prob_btts']:.0f}%)\n\n"
+
+        f"⭐ <b>Affidabilità stimata: "
+        f"{pronostico['affidabilita']:.0f}%</b>\n\n"
+
+        f"📊 <b>FORMA</b>\n"
+        f"{home}: {hs['trend']} "
+        f"({hs['ppp']:.2f} punti/partita)\n"
+        f"{away}: {aws['trend']} "
+        f"({aws['ppp']:.2f} punti/partita)\n\n"
+
+        f"⚽ <b>GOL</b>\n"
+        f"{home}: "
+        f"{hs['media_gf']:.2f} fatti / "
+        f"{hs['media_gs']:.2f} subiti\n"
+        f"{away}: "
+        f"{aws['media_gf']:.2f} fatti / "
+        f"{aws['media_gs']:.2f} subiti\n"
+        f"📈 Gol attesi: "
+        f"{pronostico['expected_home']:.2f} - "
+        f"{pronostico['expected_away']:.2f}\n\n"
+
+        f"🏠 <b>CASA / TRASFERTA</b>\n"
+        f"{home} in casa: "
+        f"{pronostico['home_split']['ppp']:.2f} "
+        f"punti/partita\n"
+        f"{away} fuori casa: "
+        f"{pronostico['away_split']['ppp']:.2f} "
+        f"punti/partita\n\n"
+
+        f"📋 <b>CLASSIFICA</b>\n"
+        f"{home}: "
+        f"{pronostico['home_rank'] or 'N/D'}°\n"
+        f"{away}: "
+        f"{pronostico['away_rank'] or 'N/D'}°\n\n"
+
+        f"🔥 <b>MOMENTUM</b>\n"
+        f"{home}: {hm['livello']}\n"
+        f"{away}: {am['livello']}\n\n"
+
+        f"🩹 <b>INFORTUNI DISPONIBILI</b>\n"
+        f"{home}: {hi['importanti']} rilevanti\n"
+        f"{away}: {ai['importanti']} rilevanti\n\n"
+
+        f"🛌 <b>FATICA / RIPOSO</b>\n"
+        f"{home}: {hf['giorni_riposo']:.1f} giorni "
+        f"di riposo — {hf['livello']}\n"
+        f"{away}: {af['giorni_riposo']:.1f} giorni "
+        f"di riposo — {af['livello']}\n"
+    )
+
+    h2h = pronostico["h2h"]
+
+    if h2h["partite"] > 0:
+
+        testo += (
+            f"\n🤝 <b>HEAD TO HEAD</b>\n"
+            f"Ultimi confronti disponibili: "
+            f"{h2h['partite']}\n"
+            f"Vittorie {home}: "
+            f"{h2h['home_vittorie']}\n"
+            f"Pareggi: "
+            f"{h2h['pareggi']}\n"
+            f"Vittorie {away}: "
+            f"{h2h['away_vittorie']}\n"
+        )
+
+    return testo
+
+
+# ============================================================
+# CREAZIONE REPORT
 # ============================================================
 
 def crea_report(
     nome_campionato,
     league_slug
 ):
+
     print("=" * 42)
     print(
-        f"🚨 CREAREPORT: "
-        f"{nome_campionato}"
+        f"🚨 CREAREPORT: {nome_campionato}"
     )
     print("=" * 42)
+
+    print(
+        f"🔎 Recupero partite future "
+        f"di {nome_campionato}..."
+    )
 
     partite = recupera_partite_future(
         league_slug
     )
 
+    print(
+        f"📋 Partite trovate: "
+        f"{len(partite)}"
+    )
+
     if not partite:
-        return (
-            "⚠️ <b>Nessuna partita trovata.</b>\n\n"
-            "ESPN non ha restituito partite "
-            "future per questo campionato "
-            "nei prossimi giorni."
+
+        print(
+            "⚠️ Nessuna partita futura "
+            "trovata."
         )
+
+        return (
+            f"⚠️ Al momento non risultano "
+            f"partite future disponibili "
+            f"per {nome_campionato}."
+        )
+
+    # --------------------------------------------------------
+    # Seleziona le prime partite
+    # --------------------------------------------------------
+
+    partite = partite[
+        :NUM_PARTITE_REPORT
+    ]
+
+    print(
+        f"🎯 Partite da analizzare: "
+        f"{len(partite)}"
+    )
 
     risultati = []
 
-    for indice, partita in enumerate(partite):
+    for indice, partita in enumerate(
+        partite
+    ):
 
         print(
             f"🔎 Analisi "
@@ -1932,68 +2165,188 @@ def crea_report(
             )
 
             if not pronostico:
+
+                print(
+                    f"⚠️ Nessun pronostico "
+                    f"generato per "
+                    f"{partita['home']} - "
+                    f"{partita['away']}"
+                )
+
                 continue
 
+            testo = formatta_pronostico(
+                partita,
+                pronostico
+            )
+
             risultati.append(
-                formatta_pronostico(
-                    partita,
-                    pronostico
+                (
+                    pronostico[
+                        "affidabilita"
+                    ],
+                    testo
                 )
             )
 
-        except Exception as e:
-
             print(
-                f"⚠️ Errore analisi "
+                f"✅ Pronostico creato: "
                 f"{partita['home']} - "
-                f"{partita['away']}: {e}"
+                f"{partita['away']} | "
+                f"Affidabilità "
+                f"{pronostico['affidabilita']:.0f}%"
             )
 
+        except Exception as exc:
+
+            print(
+                f"❌ Errore analisi "
+                f"{partita['home']} - "
+                f"{partita['away']}: "
+                f"{exc}"
+            )
+
+            traceback.print_exc()
+
+    # ========================================================
+    # QUESTE SONO LE RIGHE CHE MANCAVANO NEI LOG
+    # ========================================================
+
+    print("=" * 42)
+    print(
+        f"🏁 ANALISI COMPLETATE: "
+        f"{len(partite)}/{len(partite)}"
+    )
+
+    print(
+        f"📊 Pronostici validi creati: "
+        f"{len(risultati)}"
+    )
+
+    print("=" * 42)
+
     if not risultati:
-        return (
-            "⚠️ <b>Non sono riuscito "
-            "a costruire pronostici affidabili.</b>\n\n"
-            "I dati delle partite non sono "
-            "sufficienti in questo momento."
+
+        print(
+            "⚠️ Nessun pronostico valido "
+            "disponibile."
         )
 
-    intestazione = (
-        f"⚽ <b>PRONOSTICI "
-        f"{nome_campionato.upper()}</b>\n\n"
-        f"📅 Prossime partite\n\n"
+        return (
+            f"⚠️ Non è stato possibile "
+            f"generare pronostici validi "
+            f"per {nome_campionato}."
+        )
+
+    # migliori pronostici prima
+    risultati.sort(
+        key=lambda x: x[0],
+        reverse=True
     )
 
-    return intestazione + "\n\n".join(
-        risultati
+    blocchi = [
+        testo
+        for _, testo in risultati
+    ]
+
+    intestazione = (
+        f"🚨 <b>PRONOSTICI MIGLIORI "
+        f"{nome_campionato.upper()}</b>\n\n"
+        f"📊 Analizzate "
+        f"<b>{len(partite)}</b> partite\n"
+        f"⭐ Selezionati "
+        f"<b>{len(blocchi)}</b> pronostici\n\n"
     )
+
+    report = (
+        intestazione
+        + "\n\n".join(blocchi)
+    )
+
+    print(
+        f"📨 Report finale creato."
+    )
+
+    print(
+        f"📏 Lunghezza report: "
+        f"{len(report)} caratteri"
+    )
+
+    print(
+        "✅ CREA_REPORT TERMINATO "
+        "CORRETTAMENTE."
+    )
+
+    print("=" * 42)
+
+    return report
 
 
 # ============================================================
-# INVIO MESSAGGI DIVISI
+# INVIO REPORT TELEGRAM
 # ============================================================
 
 def invia_report_diviso(
     chat_id,
     testo
 ):
+
     limite = 3900
 
+    print("=" * 42)
+    print(
+        f"📨 INVIO REPORT TELEGRAM"
+    )
+    print(
+        f"📏 Lunghezza totale: "
+        f"{len(testo)} caratteri"
+    )
+
     if len(testo) <= limite:
+
+        print(
+            "📨 Report contenuto "
+            "in un solo messaggio."
+        )
+
         bot.send_message(
             chat_id,
             testo
         )
+
+        print(
+            "✅ Messaggio Telegram inviato."
+        )
+
+        print(
+            "🏁 REPORT TELEGRAM "
+            "INVIATO COMPLETAMENTE."
+        )
+
+        print("=" * 42)
+
         return
+
+    # --------------------------------------------------------
+    # Divisione report
+    # --------------------------------------------------------
 
     parti = []
 
-    blocchi = testo.split("\n\n")
+    blocchi = testo.split(
+        "\n\n"
+    )
 
     corrente = ""
 
     for blocco in blocchi:
 
-        if len(corrente) + len(blocco) + 2 <= limite:
+        if (
+            len(corrente)
+            + len(blocco)
+            + 2
+            <= limite
+        ):
 
             if corrente:
                 corrente += "\n\n"
@@ -2003,157 +2356,266 @@ def invia_report_diviso(
         else:
 
             if corrente:
-                parti.append(corrente)
+                parti.append(
+                    corrente
+                )
 
-            corrente = blocco
+            # sicurezza per blocchi
+            # singolarmente troppo lunghi
+            if len(blocco) <= limite:
+
+                corrente = blocco
+
+            else:
+
+                start = 0
+
+                while start < len(blocco):
+
+                    fine = min(
+                        start + limite,
+                        len(blocco)
+                    )
+
+                    parti.append(
+                        blocco[start:fine]
+                    )
+
+                    start = fine
+
+                corrente = ""
 
     if corrente:
-        parti.append(corrente)
-
-    for parte in parti:
-
-        bot.send_message(
-            chat_id,
-            parte
+        parti.append(
+            corrente
         )
+
+    print(
+        f"📨 Messaggi da inviare: "
+        f"{len(parti)}"
+    )
+
+    # --------------------------------------------------------
+    # Invio
+    # --------------------------------------------------------
+
+    for indice, parte in enumerate(
+        parti,
+        1
+    ):
+
+        print(
+            f"📤 Invio messaggio "
+            f"{indice}/{len(parti)} "
+            f"({len(parte)} caratteri)"
+        )
+
+        try:
+
+            bot.send_message(
+                chat_id,
+                parte
+            )
+
+            print(
+                f"✅ Messaggio "
+                f"{indice}/{len(parti)} "
+                f"inviato."
+            )
+
+        except Exception as exc:
+
+            print(
+                f"❌ Errore invio "
+                f"messaggio "
+                f"{indice}/{len(parti)}: "
+                f"{exc}"
+            )
+
+            traceback.print_exc()
+
+            raise
 
         time.sleep(0.3)
 
-
-# ============================================================
-# TELEGRAM - START
-# ============================================================
-
-@bot.message_handler(commands=["start"])
-def comando_start(message):
-
-    testo = (
-        "⚽ <b>Benvenuto nel Bot Pronostici Calcio!</b>\n\n"
-
-        "Posso analizzare le principali "
-        "competizioni europee usando dati "
-        "aggiornati.\n\n"
-
-        "📊 Analizzo automaticamente:\n"
-        "• forma recente\n"
-        "• rendimento casa/trasferta\n"
-        "• gol fatti e subiti\n"
-        "• classifica\n"
-        "• calendario\n"
-        "• giorni di riposo\n"
-        "• congestione delle partite\n"
-        "• impegni europei\n"
-        "• infortuni\n"
-        "• squalifiche disponibili\n"
-        "• scontri diretti\n"
-        "• vantaggio campo\n\n"
-
-        "🔮 <b>Comandi disponibili</b>\n\n"
-
-        "/campionati - Lista campionati\n"
-        "/help - Aiuto\n\n"
-
-        "Oppure scrivi direttamente:\n"
-        "🇮🇹 Serie A\n"
-        "🏴 Premier League\n"
-        "🇪🇸 La Liga\n"
-        "🇩🇪 Bundesliga\n"
-        "🇫🇷 Ligue 1"
+    print(
+        "🏁 REPORT TELEGRAM "
+        "INVIATO COMPLETAMENTE."
     )
 
-    bot.send_message(
-        message.chat.id,
-        testo
-    )
+    print("=" * 42)
 
 
 # ============================================================
-# TELEGRAM - HELP
-# ============================================================
-
-@bot.message_handler(commands=["help"])
-def comando_help(message):
-
-    testo = (
-        "ℹ️ <b>COME USARE IL BOT</b>\n\n"
-
-        "Scrivi il nome del campionato "
-        "che vuoi analizzare.\n\n"
-
-        "Esempio:\n"
-        "<b>Serie A</b>\n\n"
-
-        "Il bot cercherà le prossime partite "
-        "e creerà automaticamente il pronostico."
-    )
-
-    bot.send_message(
-        message.chat.id,
-        testo
-    )
-
-
-# ============================================================
-# TELEGRAM - CAMPIONATI
-# ============================================================
-
-@bot.message_handler(commands=["campionati"])
-def comando_campionati(message):
-
-    testo = (
-        "🏆 <b>CAMPIONATI DISPONIBILI</b>\n\n"
-        "🇮🇹 Serie A\n"
-        "🏴 Premier League\n"
-        "🇪🇸 La Liga\n"
-        "🇩🇪 Bundesliga\n"
-        "🇫🇷 Ligue 1\n\n"
-        "Scrivi il nome del campionato."
-    )
-
-    bot.send_message(
-        message.chat.id,
-        testo
-    )
-
-
-# ============================================================
-# RICONOSCIMENTO CAMPIONATO
-# ============================================================
-
-def trova_campionato(testo):
-    if not testo:
-        return None
-
-    valore = normalizza_nome(testo)
-
-    mapping = {
-        "serie a": "🇮🇹 Serie A",
-        "italia": "🇮🇹 Serie A",
-        "italian": "🇮🇹 Serie A",
-
-        "premier league": "🏴 Premier League",
-        "premier": "🏴 Premier League",
-        "inghilterra": "🏴 Premier League",
-
-        "la liga": "🇪🇸 La Liga",
-        "liga": "🇪🇸 La Liga",
-        "spagna": "🇪🇸 La Liga",
-
-        "bundesliga": "🇩🇪 Bundesliga",
-        "germania": "🇩🇪 Bundesliga",
-
-        "ligue 1": "🇫🇷 Ligue 1",
-        "francia": "🇫🇷 Ligue 1"
-    }
-
-    return mapping.get(valore)
-
-
-# ============================================================
-# TELEGRAM - MESSAGGI TESTUALI
+# /START
 # ============================================================
 
 @bot.message_handler(
+    commands=["start"]
+)
+def start(message):
+
+    print(
+        f"📩 /start ricevuto "
+        f"da chat {message.chat.id}"
+    )
+
+    testo = (
+        "⚽ <b>BOT PRONOSTICI CALCIO</b>\n\n"
+        "Benvenuto!\n\n"
+        "Posso analizzare i principali "
+        "campionati europei e generare "
+        "i pronostici migliori.\n\n"
+        "📊 Scrivi il nome del campionato "
+        "oppure usa /campionati"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        testo
+    )
+
+
+# ============================================================
+# /HELP
+# ============================================================
+
+@bot.message_handler(
+    commands=["help"]
+)
+def help_command(message):
+
+    print(
+        f"📩 /help ricevuto "
+        f"da chat {message.chat.id}"
+    )
+
+    testo = (
+        "ℹ️ <b>COME USARE IL BOT</b>\n\n"
+        "Scrivi ad esempio:\n"
+        "• Serie A\n"
+        "• Premier League\n"
+        "• La Liga\n"
+        "• Bundesliga\n"
+        "• Ligue 1\n\n"
+        "Il bot analizzerà le partite "
+        "future disponibili."
+    )
+
+    bot.send_message(
+        message.chat.id,
+        testo
+    )
+
+
+# ============================================================
+# /CAMPIONATI
+# ============================================================
+
+@bot.message_handler(
+    commands=["campionati"]
+)
+def campionati(message):
+
+    print(
+        f"📩 /campionati ricevuto "
+        f"da chat {message.chat.id}"
+    )
+
+    testo = (
+        "🏆 <b>CAMPIONATI DISPONIBILI</b>\n\n"
+    )
+
+    for nome in CAMPIONATI:
+        testo += f"{nome}\n"
+
+    testo += (
+        "\n✍️ Scrivi il nome del "
+        "campionato che vuoi analizzare."
+    )
+
+    bot.send_message(
+        message.chat.id,
+        testo
+    )
+
+
+# ============================================================
+# TROVA CAMPIONATO
+# ============================================================
+
+def trova_campionato(testo):
+
+    testo_norm = normalizza_nome(
+        testo
+    )
+
+    for nome, config in CAMPIONATI.items():
+
+        nome_norm = normalizza_nome(
+            nome
+        )
+
+        nome_config = normalizza_nome(
+            config["nome"]
+        )
+
+        if (
+            testo_norm == nome_norm
+            or testo_norm == nome_config
+        ):
+            return config
+
+    # abbreviazioni
+    if testo_norm in (
+        "seriea",
+        "serie a"
+    ):
+        return CAMPIONATI[
+            "🇮🇹 Serie A"
+        ]
+
+    if testo_norm in (
+        "premier",
+        "premier league"
+    ):
+        return CAMPIONATI[
+            "🏴 Premier League"
+        ]
+
+    if testo_norm in (
+        "liga",
+        "la liga"
+    ):
+        return CAMPIONATI[
+            "🇪🇸 La Liga"
+        ]
+
+    if testo_norm in (
+        "bundesliga",
+        "bundes"
+    ):
+        return CAMPIONATI[
+            "🇩🇪 Bundesliga"
+        ]
+
+    if testo_norm in (
+        "ligue1",
+        "ligue 1"
+    ):
+        return CAMPIONATI[
+            "🇫🇷 Ligue 1"
+        ]
+
+    return None
+
+
+# ============================================================
+# MESSAGGI TESTUALI
+# ============================================================
+
+@bot.message_handler(
+    func=lambda message: True,
     content_types=["text"]
 )
 def messaggio_testuale(message):
@@ -2168,37 +2630,39 @@ def messaggio_testuale(message):
 
     if not campionato:
 
+        print(
+            f"⚠️ Testo non riconosciuto: "
+            f"{testo}"
+        )
+
         bot.send_message(
             message.chat.id,
-            "⚠️ Non ho riconosciuto il campionato.\n\n"
-            "Scrivi /campionati per vedere "
+            "⚠️ Campionato non riconosciuto.\n\n"
+            "Usa /campionati per vedere "
             "quelli disponibili."
         )
 
         return
 
-    config = CAMPIONATI.get(
-        campionato
+    config = campionato
+
+    print("=" * 42)
+    print(
+        f"📨 RICHIESTA CAMPIONATO: "
+        f"{config['nome']}"
     )
 
-    if not config:
-
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Campionato non configurato."
-        )
-
-        return
+    print(
+        f"👤 Chat ID: "
+        f"{message.chat.id}"
+    )
 
     bot.send_message(
         message.chat.id,
-        (
-            f"🔎 <b>Analizzo "
-            f"{config['nome']}...</b>\n\n"
-            "⏳ Sto controllando forma, "
-            "classifica, calendario, "
-            "infortuni e impegni europei."
-        )
+        f"🔎 Analizzo <b>{config['nome']}</b>...\n"
+        f"⏳ Sto confrontando forma, "
+        f"gol, classifica, casa/trasferta, "
+        f"fatica, infortuni e H2H."
     )
 
     try:
@@ -2208,24 +2672,51 @@ def messaggio_testuale(message):
             config["espn"]
         )
 
+        print(
+            "📊 Report generato."
+        )
+
+        print(
+            "📤 Avvio invio Telegram..."
+        )
+
         invia_report_diviso(
             message.chat.id,
             report
         )
 
-    except Exception as e:
+        print(
+            f"✅ ELABORAZIONE "
+            f"{config['nome']} TERMINATA."
+        )
+
+        print("=" * 42)
+
+    except Exception as exc:
 
         print(
-            f"❌ Errore creazione report: {e}"
+            f"❌ ERRORE CREAZIONE REPORT: "
+            f"{exc}"
         )
 
-        bot.send_message(
-            message.chat.id,
-            (
-                "❌ <b>Errore durante l'analisi.</b>\n\n"
-                "Riprova tra qualche minuto."
+        traceback.print_exc()
+
+        try:
+
+            bot.send_message(
+                message.chat.id,
+                "❌ Si è verificato un "
+                "errore durante l'analisi. "
+                "Controlla i log di Render."
             )
-        )
+
+        except Exception as telegram_error:
+
+            print(
+                f"❌ Errore invio messaggio "
+                f"di errore Telegram: "
+                f"{telegram_error}"
+            )
 
 
 # ============================================================
@@ -2241,14 +2732,19 @@ class HealthHandler(
         format,
         *args
     ):
+        # Evita log HTTP inutilmente rumorosi
         return
 
     def do_GET(self):
 
-        if self.path in ["/", "/health"]:
+        if self.path in (
+            "/",
+            "/health"
+        ):
 
             risposta = (
-                "BOT PRONOSTICI CALCIO - ONLINE"
+                "Bot pronostici calcio "
+                "attivo."
             )
 
             self.send_response(200)
@@ -2260,7 +2756,9 @@ class HealthHandler(
 
             self.send_header(
                 "Content-Length",
-                str(len(resposta.encode("utf-8")))
+                str(len(
+                    risposta.encode("utf-8")
+                ))
             )
 
             self.end_headers()
@@ -2276,7 +2774,17 @@ class HealthHandler(
 
     def do_POST(self):
 
+        print(
+            f"📩 POST RICEVUTA: "
+            f"{self.path}"
+        )
+
         if self.path != WEBHOOK_PATH:
+
+            print(
+                "⚠️ POST su percorso "
+                "non riconosciuto."
+            )
 
             self.send_response(404)
             self.end_headers()
@@ -2285,16 +2793,11 @@ class HealthHandler(
 
         try:
 
-            print(
-                f"📩 POST RICEVUTA: "
-                f"{self.path}"
-            )
-
-            content_length = int(
+            content_length = safe_int(
                 self.headers.get(
-                    "Content-Length",
-                    "0"
-                )
+                    "Content-Length"
+                ),
+                0
             )
 
             print(
@@ -2310,15 +2813,21 @@ class HealthHandler(
                 body.decode("utf-8")
             )
 
-            update = telebot.types.Update.de_json(
-                json.dumps(update_data)
+            print(
+                "⚙️ Elaborazione update "
+                "Telegram..."
+            )
+
+            update = (
+                telebot.types.Update
+                .de_json(update_data)
             )
 
             print(
-                "⚙️ Elaborazione update Telegram..."
+                "✅ Update Telegram elaborato."
             )
 
-            def elabora_update():
+            def process_update():
 
                 try:
 
@@ -2327,24 +2836,25 @@ class HealthHandler(
                     )
 
                     print(
-                        "✅ Update Telegram elaborato."
+                        "✅ Update inviato "
+                        "al thread."
                     )
 
-                except Exception as e:
+                except Exception as exc:
 
                     print(
-                        f"❌ Errore "
-                        f"processamento update: {e}"
+                        f"❌ Errore elaborazione "
+                        f"update: {exc}"
                     )
 
-            threading.Thread(
-                target=elabora_update,
-                daemon=True
-            ).start()
+                    traceback.print_exc()
 
-            print(
-                "✅ Update inviato al thread."
+            thread = threading.Thread(
+                target=process_update,
+                daemon=True
             )
+
+            thread.start()
 
             self.send_response(200)
 
@@ -2359,52 +2869,50 @@ class HealthHandler(
                 b"OK"
             )
 
-        except Exception as e:
+        except Exception as exc:
 
             print(
-                f"❌ Errore webhook: {e}"
+                f"❌ ERRORE WEBHOOK: "
+                f"{exc}"
             )
+
+            traceback.print_exc()
 
             self.send_response(500)
             self.end_headers()
 
 
 # ============================================================
-# WEBHOOK TELEGRAM
+# CONFIGURAZIONE WEBHOOK
 # ============================================================
 
 def configura_webhook():
 
+    print("=" * 42)
+    print(
+        "🌐 CONFIGURAZIONE WEBHOOK TELEGRAM"
+    )
+
+    print(
+        f"🌐 URL webhook: "
+        f"{WEBHOOK_URL}"
+    )
+
     try:
 
-        print("=" * 50)
-        print("CONFIGURAZIONE TELEGRAM")
-        print("=" * 50)
-
         print(
-            f"🌐 Webhook URL: "
-            f"{WEBHOOK_URL}"
+            "🧹 Rimozione eventuale "
+            "webhook precedente..."
         )
 
-        # Rimuove eventuali vecchi webhook
-        try:
+        bot.remove_webhook()
 
-            bot.remove_webhook()
+        time.sleep(1)
 
-            print(
-                "🧹 Vecchio webhook rimosso."
-            )
+        print(
+            "🔗 Impostazione nuovo webhook..."
+        )
 
-            time.sleep(1)
-
-        except Exception as e:
-
-            print(
-                f"⚠️ Impossibile rimuovere "
-                f"vecchio webhook: {e}"
-            )
-
-        # Imposta il nuovo webhook
         risultato = bot.set_webhook(
             url=WEBHOOK_URL,
             drop_pending_updates=True
@@ -2415,24 +2923,23 @@ def configura_webhook():
             f"{risultato}"
         )
 
-        info = bot.get_webhook_info()
-
         print(
-            f"📡 Webhook Telegram: "
-            f"{info.url}"
+            "🏁 Configurazione Telegram "
+            "completata."
         )
 
-        print(
-            f"📦 Pending updates: "
-            f"{info.pending_update_count}"
-        )
-
-    except Exception as e:
+    except Exception as exc:
 
         print(
-            f"❌ Errore configurazione "
-            f"webhook: {e}"
+            f"❌ ERRORE CONFIGURAZIONE "
+            f"WEBHOOK: {exc}"
         )
+
+        traceback.print_exc()
+
+        raise
+
+    print("=" * 42)
 
 
 # ============================================================
@@ -2441,46 +2948,89 @@ def configura_webhook():
 
 def main():
 
-    print("=" * 50)
-    print("SERVER RENDER ATTIVO")
-    print("=" * 50)
+    print(
+        "🚀 Avvio server HTTP Render..."
+    )
 
     server = http.server.ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         HealthHandler
     )
 
-    thread_server = threading.Thread(
+    server_thread = threading.Thread(
         target=server.serve_forever,
         daemon=True
     )
 
-    thread_server.start()
+    server_thread.start()
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        "Server Render attivo."
+    )
+
+    print(
+        "=========================================="
+    )
 
     print(
         f"🌐 Server HTTP avviato "
         f"sulla porta {PORT}"
     )
 
-    time.sleep(2)
+    print(
+        f"🌐 Health URL: "
+        f"{RENDER_EXTERNAL_URL}/health"
+    )
+
+    print(
+        "=========================================="
+    )
 
     configura_webhook()
 
-    print("=" * 50)
-    print("🚀 BOT ONLINE")
-    print("=" * 50)
+    print(
+        "=========================================="
+    )
 
-    # IMPORTANTE:
+    print(
+        "✅ BOT TELEGRAM OPERATIVO"
+    )
+
+    print(
+        "✅ MODALITÀ: WEBHOOK"
+    )
+
+    print(
+        "❌ POLLING: DISATTIVATO"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    # Mantiene vivo il processo Render.
     # NON usare infinity_polling().
-    #
-    # Telegram comunica con il bot attraverso
-    # il webhook HTTP.
-    #
-    # Il processo deve semplicemente rimanere attivo.
+    try:
 
-    while True:
-        time.sleep(60)
+        while True:
+            time.sleep(60)
 
+    except KeyboardInterrupt:
+
+        print(
+            "🛑 Arresto applicazione..."
+        )
+
+        server.shutdown()
+
+
+# ============================================================
+# AVVIO
+# ============================================================
 
 if __name__ == "__main__":
     main()
