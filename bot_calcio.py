@@ -124,7 +124,13 @@ def carica_secret_file():
 # ============================================================
 # RICARICA TOKEN DOPO SECRET FILE
 # ============================================================
+TOKEN_ENV_PRIMA = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
+print("========== ORIGINE TOKEN ==========")
+print("Token ENV prima del Secret File:", bool(TOKEN_ENV_PRIMA))
+print("Numero ':' ENV prima:", TOKEN_ENV_PRIMA.count(":"))
+print("Lunghezza ENV prima:", len(TOKEN_ENV_PRIMA))
+print("===================================")
 carica_secret_file()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
