@@ -3,32 +3,153 @@ import json
 import time
 import threading
 import http.server
-import socketserver
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 
 import requests
 import telebot
 
 
 # ============================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE RENDER - SECRET FILE
 # ============================================================
 
 SECRET_FILE = "/etc/secrets/bot_secrets.env"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
 
-RENDER_PORT = int(os.getenv("PORT", "10000"))
+def carica_secret_file():
+    """
+    Legge le credenziali dal Secret File di Render.
+    Se una variabile esiste già nell'ambiente, non viene sovrascritta.
+    """
 
-API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
-SPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json/123"
+    if not os.path.exists(SECRET_FILE):
+        print(
+            "⚠️ Secret File non trovato.",
+            flush=True
+        )
+        return
 
-API_TIMEOUT = 30
+    try:
 
-NUMERO_PARTITE_REPORT = 8
-NUMERO_PARTITE_FORM = 10
+        with open(
+            SECRET_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            for line in file:
+
+                line = line.strip()
+
+                if (
+                    not line
+                    or line.startswith("#")
+                    or "=" not in line
+                ):
+                    continue
+
+                key, value = line.split(
+                    "=",
+                    1
+                )
+
+                key = key.strip()
+                value = value.strip()
+
+                if not os.getenv(key):
+                    os.environ[key] = value
+
+        print(
+            "✅ Secret File caricato correttamente.",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore lettura Secret File: {e}",
+            flush=True
+        )
+
+
+carica_secret_file()
+
+
+# ============================================================
+# CONFIGURAZIONE
+# ============================================================
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
+
+FOOTBALL_API_KEY = os.getenv(
+    "FOOTBALL_API_KEY"
+)
+
+PORT = int(
+    os.getenv(
+        "PORT",
+        "10000"
+    )
+)
+
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    "https://bot-pronostici-gratis.onrender.com"
+).rstrip("/")
+
+
+WEBHOOK_PATH = "/telegram/webhook"
+
+WEBHOOK_URL = (
+    RENDER_EXTERNAL_URL
+    + WEBHOOK_PATH
+)
+
+
+API_BASE_URL = (
+    "https://v3.football.api-sports.io"
+)
+
+
+# ============================================================
+# CONTROLLO CREDENZIALI
+# ============================================================
+
+if not TELEGRAM_BOT_TOKEN:
+
+    raise RuntimeError(
+        "❌ TELEGRAM_BOT_TOKEN non configurato."
+    )
+
+
+if not FOOTBALL_API_KEY:
+
+    raise RuntimeError(
+        "❌ FOOTBALL_API_KEY non configurato."
+    )
+
+
+print(
+    "TELEGRAM_BOT_TOKEN: OK",
+    flush=True
+)
+
+print(
+    "FOOTBALL_API_KEY: OK",
+    flush=True
+)
+
+
+# ============================================================
+# TELEGRAM BOT
+# ============================================================
+
+bot = telebot.TeleBot(
+    TELEGRAM_BOT_TOKEN,
+    parse_mode=None
+)
 
 
 # ============================================================
@@ -36,1253 +157,1949 @@ NUMERO_PARTITE_FORM = 10
 # ============================================================
 
 CAMPIONATI = {
-    "serie a": {
-        "nome": "🇮🇹 Serie A",
-        "api_id": 135,
-        "sportsdb_id": 4332
+
+    "🇮🇹 Serie A": {
+        "id": 135,
+        "nome": "Serie A"
     },
 
-    "premier league": {
-        "nome": "🏴 Premier League",
-        "api_id": 39,
-        "sportsdb_id": 4328
+    "🇬🇧 Premier League": {
+        "id": 39,
+        "nome": "Premier League"
     },
 
-    "la liga": {
-        "nome": "🇪🇸 La Liga",
-        "api_id": 140,
-        "sportsdb_id": 4335
+    "🇪🇸 La Liga": {
+        "id": 140,
+        "nome": "La Liga"
     },
 
-    "bundesliga": {
-        "nome": "🇩🇪 Bundesliga",
-        "api_id": 78,
-        "sportsdb_id": 4331
+    "🇩🇪 Bundesliga": {
+        "id": 78,
+        "nome": "Bundesliga"
     },
 
-    "ligue 1": {
-        "nome": "🇫🇷 Ligue 1",
-        "api_id": 61,
-        "sportsdb_id": 4334
+    "🇫🇷 Ligue 1": {
+        "id": 61,
+        "nome": "Ligue 1"
     }
+
 }
 
 
 # ============================================================
-# VARIABILI GLOBALI
+# CONFIGURAZIONE ANALISI
 # ============================================================
 
-bot = None
+NUMERO_PARTITE_REPORT = 8
 
-cache_api = {}
-cache_sportsdb = {}
+NUMERO_PARTITE_FORM = 10
 
-CACHE_API_SECONDS = 300
-CACHE_SPORTSDB_SECONDS = 900
+API_TIMEOUT = 30
 
 
 # ============================================================
-# LETTURA SECRET FILE RENDER
+# CACHE
 # ============================================================
 
-def carica_secret_file():
-    """
-    Carica le variabili dal Secret File di Render, se presente.
-    """
+CACHE = {}
 
-    if not os.path.exists(SECRET_FILE):
-        return
+CACHE_LOCK = threading.Lock()
 
-    try:
-        with open(SECRET_FILE, "r", encoding="utf-8") as file:
-            for riga in file:
-                riga = riga.strip()
-
-                if not riga:
-                    continue
-
-                if riga.startswith("#"):
-                    continue
-
-                if "=" not in riga:
-                    continue
-
-                nome, valore = riga.split("=", 1)
-
-                nome = nome.strip()
-                valore = valore.strip().strip('"').strip("'")
-
-                if nome and valore:
-                    os.environ[nome] = valore
-
-        print("✅ Secret File caricato correttamente.")
-
-    except Exception as errore:
-        print(f"⚠️ Errore lettura Secret File: {errore}")
+CACHE_TTL = 600
 
 
-# ============================================================
-# RICARICA TOKEN DOPO SECRET FILE
-# ============================================================
-TOKEN_ENV_PRIMA = os.getenv("TELEGRAM_BOT_TOKEN", "")
+def cache_get(chiave):
 
-print("========== ORIGINE TOKEN ==========")
-print("Token ENV prima del Secret File:", bool(TOKEN_ENV_PRIMA))
-print("Numero ':' ENV prima:", TOKEN_ENV_PRIMA.count(":"))
-print("Lunghezza ENV prima:", len(TOKEN_ENV_PRIMA))
-print("===================================")
-carica_secret_file()
+    with CACHE_LOCK:
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
+        elemento = CACHE.get(chiave)
 
+        if not elemento:
+            return None
 
-# ============================================================
-# VERIFICA CONFIGURAZIONE
-# ============================================================
+        timestamp, valore = elemento
 
-print()
-print("TELEGRAM_BOT_TOKEN:", "OK" if TELEGRAM_BOT_TOKEN else "MANCANTE")
-print("FOOTBALL_API_KEY:", "OK" if FOOTBALL_API_KEY else "MANCANTE")
-print()
+        if time.time() - timestamp > CACHE_TTL:
+
+            del CACHE[chiave]
+
+            return None
+
+        return valore
 
 
-# ============================================================
-# CREAZIONE BOT TELEGRAM
-# ============================================================
+def cache_set(
+    chiave,
+    valore
+):
 
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN non configurato. "
-        "Inseriscilo nelle Environment Variables / Secret Files di Render."
-    )
-print("========== CONTROLLO TOKEN ==========")
+    with CACHE_LOCK:
 
-print(
-    "Token presente:",
-    bool(TELEGRAM_BOT_TOKEN)
-)
-
-print(
-    "Lunghezza token:",
-    len(TELEGRAM_BOT_TOKEN)
-)
-
-print(
-    "Numero di ':' nel token:",
-    TELEGRAM_BOT_TOKEN.count(":")
-)
-
-print(
-    "Token contiene spazi:",
-    " " in TELEGRAM_BOT_TOKEN
-)
-
-print(
-    "Token contiene '\\\\':",
-    "\\" in TELEGRAM_BOT_TOKEN
-)
-
-print(
-    "Token contiene virgolette:",
-    '"' in TELEGRAM_BOT_TOKEN
-    or "'" in TELEGRAM_BOT_TOKEN
-)
-
-parti_token = TELEGRAM_BOT_TOKEN.split(":")
-
-print("========== DIAGNOSI TOKEN ==========")
-print("Numero parti:", len(parti_token))
-print("Lunghezze:", [len(parte) for parte in parti_token])
-
-for i, parte in enumerate(parti_token):
-    print(
-        f"Parte {i + 1}: "
-        f"inizia_con_numero={parte[:1].isdigit()}, "
-        f"lunghezza={len(parte)}"
-    )
-
-print("====================================")
-
-print("======================================")
-
-bot = telebot.TeleBot(
-    TELEGRAM_BOT_TOKEN,
-    parse_mode="HTML"
-)
-bot = telebot.TeleBot(
-    TELEGRAM_BOT_TOKEN,
-    parse_mode="HTML"
-)
-
-
-# ============================================================
-# FUNZIONE HTTP GENERICA
-# ============================================================
-
-def richiesta_http(url, params=None, headers=None, timeout=API_TIMEOUT):
-
-    try:
-        risposta = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=timeout
+        CACHE[chiave] = (
+            time.time(),
+            valore
         )
 
-        print()
-        print("🌐 RICHIESTA HTTP")
-        print("URL:", risposta.url)
-        print("HTTP:", risposta.status_code)
-
-        if risposta.status_code != 200:
-            print("❌ HTTP ERROR:", risposta.text[:500])
-            return None
-
-        try:
-            return risposta.json()
-
-        except Exception:
-            print("❌ Risposta non JSON.")
-            return None
-
-    except requests.exceptions.Timeout:
-        print("❌ Timeout HTTP.")
-        return None
-
-    except requests.exceptions.RequestException as errore:
-        print(f"❌ Errore HTTP: {errore}")
-        return None
-
-    except Exception as errore:
-        print(f"❌ Errore generico HTTP: {errore}")
-        return None
-
 
 # ============================================================
-# API-FOOTBALL
+# FUNZIONE API-FOOTBALL
 # ============================================================
 
-def api_football_get(endpoint, params=None):
-
-    if not FOOTBALL_API_KEY:
-        print("⚠️ FOOTBALL_API_KEY non configurata.")
-        return None
+def api_get(
+    endpoint,
+    params=None
+):
 
     chiave_cache = (
         endpoint,
-        tuple(sorted((params or {}).items()))
-    )
-
-    adesso = time.time()
-
-    if chiave_cache in cache_api:
-        timestamp, dati = cache_api[chiave_cache]
-
-        if adesso - timestamp < CACHE_API_SECONDS:
-            print("♻️ API-Football: utilizzo cache.")
-            return dati
-
-    url = f"{API_FOOTBALL_BASE}/{endpoint}"
-
-    headers = {
-        "x-apisports-key": FOOTBALL_API_KEY
-    }
-
-    print()
-    print("==========================================")
-    print("🌐 API-FOOTBALL:", f"/{endpoint}")
-    print("📋 PARAMETRI:", params)
-    print("==========================================")
-
-    dati = richiesta_http(
-        url,
-        params=params,
-        headers=headers
-    )
-
-    if dati is not None:
-        cache_api[chiave_cache] = (
-            adesso,
-            dati
+        tuple(
+            sorted(
+                (params or {}).items()
+            )
         )
-
-    return dati
-
-
-# ============================================================
-# THESPORTSDB
-# ============================================================
-
-def sportsdb_get(endpoint, params=None):
-
-    chiave_cache = (
-        endpoint,
-        tuple(sorted((params or {}).items()))
     )
 
-    adesso = time.time()
-
-    if chiave_cache in cache_sportsdb:
-        timestamp, dati = cache_sportsdb[chiave_cache]
-
-        if adesso - timestamp < CACHE_SPORTSDB_SECONDS:
-            print("♻️ TheSportsDB: utilizzo cache.")
-            return dati
-
-    url = f"{SPORTSDB_BASE}/{endpoint}"
-
-    print()
-    print("==========================================")
-    print("🌐 THESPORTSDB:", f"/{endpoint}")
-    print("📋 PARAMETRI:", params)
-    print("==========================================")
-
-    dati = richiesta_http(
-        url,
-        params=params
+    dati_cache = cache_get(
+        chiave_cache
     )
 
-    if dati is not None:
-        cache_sportsdb[chiave_cache] = (
-            adesso,
-            dati
-        )
-
-    return dati
-
-
-# ============================================================
-# DATA / STAGIONE
-# ============================================================
-
-def stagione_corrente():
-
-    oggi = datetime.now()
-
-    # Campionati europei:
-    # stagione 2026-2027 da luglio 2026 in poi.
-
-    if oggi.month >= 7:
-        return f"{oggi.year}-{oggi.year + 1}"
-
-    return f"{oggi.year - 1}-{oggi.year}"
-
-
-def stagione_api_football():
-
-    oggi = datetime.now()
-
-    if oggi.month >= 7:
-        return oggi.year
-
-    return oggi.year - 1
-
-
-def parse_data_evento(data_string):
-
-    if not data_string:
-        return None
-
-    formati = [
-        "%Y-%m-%d",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S%z"
-    ]
-
-    for formato in formati:
-        try:
-            return datetime.strptime(data_string, formato)
-        except Exception:
-            pass
-
-    return None
-
-
-def formatta_data(data_string, ora=None):
-
-    data = parse_data_evento(data_string)
-
-    if not data:
-        return str(data_string or "")
-
-    giorni = [
-        "Lunedì",
-        "Martedì",
-        "Mercoledì",
-        "Giovedì",
-        "Venerdì",
-        "Sabato",
-        "Domenica"
-    ]
-
-    giorno = giorni[data.weekday()]
-
-    if ora:
-        try:
-            ora_pulita = str(ora)[:5]
-        except Exception:
-            ora_pulita = ""
-
-        if ora_pulita:
-            return f"{giorno} {data.strftime('%d/%m/%Y')} ore {ora_pulita}"
-
-    return f"{giorno} {data.strftime('%d/%m/%Y')}"
-
-
-# ============================================================
-# CONVERSIONE EVENTO THESPORTSDB
-# ============================================================
-
-def converti_evento_sportsdb(evento):
-
-    if not evento:
-        return None
-
-    casa = (
-        evento.get("strHomeTeam")
-        or evento.get("homeTeam")
-        or "Casa"
-    )
-
-    trasferta = (
-        evento.get("strAwayTeam")
-        or evento.get("awayTeam")
-        or "Trasferta"
-    )
-
-    data = evento.get("dateEvent")
-
-    ora = evento.get("strTime")
-
-    fixture_id = None
-
-    # TheSportsDB può avere il riferimento ad API-Football
-    raw_api_id = evento.get("idAPIfootball")
-
-    if raw_api_id:
-        try:
-            fixture_id = int(raw_api_id)
-        except Exception:
-            fixture_id = None
-
-    raw_event_id = evento.get("idEvent")
-
-    try:
-        event_id = int(raw_event_id) if raw_event_id else None
-    except Exception:
-        event_id = None
-
-    return {
-        "id": fixture_id,
-        "sportsdb_id": event_id,
-        "home": casa,
-        "away": trasferta,
-        "date": data,
-        "time": ora,
-        "status": evento.get("strStatus"),
-        "league": evento.get("strLeague"),
-        "raw": evento
-    }
-
-
-# ============================================================
-# RECUPERA PARTITE DA THESPORTSDB
-# ============================================================
-
-def recupera_partite_sportsdb(nome_campionato):
-
-    campionato = CAMPIONATI.get(nome_campionato.lower())
-
-    if not campionato:
-        return []
-
-    league_id = campionato["sportsdb_id"]
-
-    stagione = stagione_corrente()
-
-    print()
-    print("==========================================")
-    print("⚽ THESPORTSDB - CALENDARIO")
-    print("🏆 Campionato:", campionato["nome"])
-    print("🆔 League ID:", league_id)
-    print("📅 Stagione:", stagione)
-    print("==========================================")
-
-    # --------------------------------------------------------
-    # PRIMO TENTATIVO:
-    # EVENTI DELL'INTERA STAGIONE
-    # --------------------------------------------------------
-
-    dati = sportsdb_get(
-        "eventsseason.php",
-        {
-            "id": league_id,
-            "s": stagione
-        }
-    )
-
-    eventi = []
-
-    if isinstance(dati, dict):
-        eventi = dati.get("events") or []
-
-    print("📦 Eventi ricevuti:", len(eventi))
-
-    # --------------------------------------------------------
-    # SE NON ARRIVA NULLA, TENTIAMO EVENTI SUCCESSIVI
-    # --------------------------------------------------------
-
-    if not eventi:
-
-        print("⚠️ Nessun evento dalla stagione.")
-        print("🔎 Provo eventsnextleague.php...")
-
-        dati_next = sportsdb_get(
-            "eventsnextleague.php",
-            {
-                "id": league_id
-            }
-        )
-
-        if isinstance(dati_next, dict):
-            eventi = dati_next.get("events") or []
+    if dati_cache is not None:
 
         print(
-            "📦 Eventi ricevuti da eventsnextleague:",
-            len(eventi)
+            f"♻️ CACHE API: /{endpoint}",
+            flush=True
         )
 
-    if not eventi:
-        print("❌ TheSportsDB non ha restituito partite.")
+        return dati_cache
+
+
+    url = (
+        f"{API_BASE_URL}/{endpoint}"
+    )
+
+
+    headers = {
+
+        "x-apisports-key":
+            FOOTBALL_API_KEY,
+
+        "Accept":
+            "application/json"
+
+    }
+
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+    print(
+        f"🌐 API-FOOTBALL: /{endpoint}",
+        flush=True
+    )
+
+    print(
+        f"📋 PARAMETRI: {params}",
+        flush=True
+    )
+
+
+    try:
+
+        response = requests.get(
+
+            url,
+
+            headers=headers,
+
+            params=params,
+
+            timeout=API_TIMEOUT
+
+        )
+
+
+        print(
+            f"📡 HTTP {response.status_code}: {url}",
+            flush=True
+        )
+
+
+        if response.status_code != 200:
+
+            print(
+                f"❌ Risposta HTTP non valida: "
+                f"{response.status_code}",
+                flush=True
+            )
+
+            print(
+                response.text[:1000],
+                flush=True
+            )
+
+            return None
+
+
+        dati = response.json()
+
+
+        errori = dati.get(
+            "errors"
+        )
+
+        if errori:
+
+            print(
+                f"❌ Errori API: {errori}",
+                flush=True
+            )
+
+            return None
+
+
+        risposta = dati.get(
+            "response"
+        )
+
+
+        if risposta is None:
+
+            print(
+                "⚠️ API senza campo response.",
+                flush=True
+            )
+
+            return None
+
+
+        cache_set(
+            chiave_cache,
+            dati
+        )
+
+
+        return dati
+
+
+    except requests.exceptions.Timeout:
+
+        print(
+            "❌ Timeout API-Football.",
+            flush=True
+        )
+
+        return None
+
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"❌ Errore richiesta API-Football: {e}",
+            flush=True
+        )
+
+        return None
+
+
+    except ValueError as e:
+
+        print(
+            f"❌ Errore JSON API-Football: {e}",
+            flush=True
+        )
+
+        return None
+
+
+# ============================================================
+# TEST API
+# ============================================================
+
+def test_api():
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+    print(
+        "🔎 TEST API-FOOTBALL...",
+        flush=True
+    )
+
+
+    dati = api_get(
+        "countries"
+    )
+
+
+    if dati is not None:
+
+        print(
+            "✅ API-FOOTBALL RAGGIUNGIBILE.",
+            flush=True
+        )
+
+        print(
+            "==========================================",
+            flush=True
+        )
+
+        return True
+
+
+    print(
+        "❌ API-FOOTBALL NON RAGGIUNGIBILE.",
+        flush=True
+    )
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+    return False
+
+
+# ============================================================
+# FORMATTA DATA
+# ============================================================
+
+def formatta_data(
+    data_string
+):
+
+    if not data_string:
+
+        return "Data non disponibile"
+
+
+    try:
+
+        data = datetime.fromisoformat(
+            data_string.replace(
+                "Z",
+                "+00:00"
+            )
+        )
+
+
+        try:
+
+            from zoneinfo import ZoneInfo
+
+            if data.tzinfo:
+
+                data = data.astimezone(
+                    ZoneInfo("Europe/Rome")
+                )
+
+        except Exception:
+
+            pass
+
+
+        return data.strftime(
+            "%d/%m/%Y %H:%M"
+        )
+
+
+    except Exception:
+
+        return str(
+            data_string
+        )
+
+
+# ============================================================
+# RECUPERA PROSSIME PARTITE
+#
+# IMPORTANTE:
+#
+# NON utilizziamo:
+#
+# season=2026
+# from=...
+# to=...
+#
+# perché il piano Free dell'API sta bloccando la stagione
+# corrente.
+#
+# Utilizziamo invece:
+#
+# league + next
+#
+# ============================================================
+
+def recupera_partite(
+    league_id
+):
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+    print(
+        "⚽ RICERCA PROSSIME PARTITE",
+        flush=True
+    )
+
+    print(
+        f"🏆 League ID: {league_id}",
+        flush=True
+    )
+
+    print(
+        "🔎 Metodo: parametro NEXT",
+        flush=True
+    )
+
+    print(
+        f"📊 Numero richiesto: "
+        f"{NUMERO_PARTITE_REPORT}",
+        flush=True
+    )
+
+
+    # ========================================================
+    # PRIMO TENTATIVO
+    #
+    # Chiediamo direttamente le prossime partite.
+    #
+    # Questo evita di specificare la stagione 2026.
+    # ========================================================
+
+    dati = api_get(
+
+        "fixtures",
+
+        {
+            "league": league_id,
+            "next": NUMERO_PARTITE_REPORT,
+            "timezone": "Europe/Rome"
+        }
+
+    )
+
+
+    if not dati:
+
+        print(
+            "❌ API non ha restituito "
+            "le prossime partite.",
+            flush=True
+        )
+
+        print(
+            "⚠️ Il piano Free potrebbe "
+            "non consentire le partite future "
+            "di questa competizione.",
+            flush=True
+        )
+
         return []
 
-    oggi = datetime.now().date()
+
+    eventi = dati.get(
+        "response",
+        []
+    )
+
+
+    print(
+        f"📊 Partite ricevute dall'API: "
+        f"{len(eventi)}",
+        flush=True
+    )
+
+
+    if not eventi:
+
+        print(
+            "⚠️ Nessuna partita restituita "
+            "dal parametro NEXT.",
+            flush=True
+        )
+
+        return []
+
 
     partite = []
+
 
     for evento in eventi:
 
-        convertito = converti_evento_sportsdb(evento)
-
-        if not convertito:
-            continue
-
-        data_evento = parse_data_evento(
-            convertito["date"]
+        fixture = evento.get(
+            "fixture",
+            {}
         )
 
-        if not data_evento:
-            continue
-
-        # Solo partite da oggi in avanti
-        if data_evento.date() < oggi:
-            continue
-
-        partite.append(convertito)
-
-    # Ordina per data e ora
-    partite.sort(
-        key=lambda partita: (
-            partita.get("date") or "",
-            partita.get("time") or ""
-        )
-    )
-
-    partite = partite[:NUMERO_PARTITE_REPORT]
-
-    print()
-    print("✅ PARTITE FUTURE TROVATE:", len(partite))
-
-    for partita in partite:
-        print(
-            "⚽",
-            partita["home"],
-            "-",
-            partita["away"],
-            "|",
-            partita["date"],
-            partita["time"]
+        teams = evento.get(
+            "teams",
+            {}
         )
 
-    return partite
+
+        fixture_id = fixture.get(
+            "id"
+        )
 
 
-# ============================================================
-# FALLBACK API-FOOTBALL
-# ============================================================
+        stato = (
+            fixture
+            .get("status", {})
+            .get("short", "")
+        )
 
-def recupera_partite_api_football(nome_campionato):
 
-    campionato = CAMPIONATI.get(nome_campionato.lower())
+        casa = (
+            teams
+            .get("home", {})
+            .get("name")
+        )
 
-    if not campionato:
-        return []
 
-    league_id = campionato["api_id"]
+        trasferta = (
+            teams
+            .get("away", {})
+            .get("name")
+        )
 
-    stagione = stagione_api_football()
 
-    print()
-    print("==========================================")
-    print("🔎 FALLBACK API-FOOTBALL")
-    print("🏆 League ID:", league_id)
-    print("📅 Stagione:", stagione)
-    print("==========================================")
+        if not fixture_id:
 
-    dati = api_football_get(
-        "fixtures",
-        {
-            "league": league_id,
-            "season": stagione,
-            "timezone": "Europe/Rome"
-        }
-    )
-
-    if not isinstance(dati, dict):
-        return []
-
-    errori = dati.get("errors")
-
-    if errori:
-        print("❌ Errori API:", errori)
-        return []
-
-    risultati = dati.get("response") or []
-
-    oggi = datetime.now().date()
-
-    partite = []
-
-    for item in risultati:
-
-        fixture = item.get("fixture") or {}
-        teams = item.get("teams") or {}
-
-        timestamp = fixture.get("timestamp")
-
-        data_string = None
-
-        if timestamp:
-            try:
-                data_string = datetime.fromtimestamp(
-                    timestamp
-                ).strftime("%Y-%m-%d")
-            except Exception:
-                pass
-
-        if not data_string:
-            data_ora = fixture.get("date", "")
-            data_string = str(data_ora)[:10]
-
-        data_evento = parse_data_evento(data_string)
-
-        if data_evento and data_evento.date() < oggi:
             continue
 
-        casa = (teams.get("home") or {}).get("name")
-        trasferta = (teams.get("away") or {}).get("name")
 
         if not casa or not trasferta:
+
             continue
+
+
+        # ====================================================
+        # STATI ANCORA DA GIOCARE
+        # ====================================================
+
+        stati_validi = (
+            "NS",
+            "TBD",
+            "PST"
+        )
+
+
+        if stato not in stati_validi:
+
+            continue
+
+
+        data_partita = fixture.get(
+            "date"
+        )
+
 
         partite.append({
-            "id": fixture.get("id"),
-            "sportsdb_id": None,
-            "home": casa,
-            "away": trasferta,
-            "date": data_string,
-            "time": (
-                str(fixture.get("date", ""))[11:16]
-                if fixture.get("date")
-                else ""
-            ),
-            "status": (fixture.get("status") or {}).get("short"),
-            "league": nome_campionato,
-            "raw": item
+
+            "id": fixture_id,
+
+            "casa": casa,
+
+            "trasferta": trasferta,
+
+            "data": data_partita,
+
+            "timestamp":
+                fixture.get(
+                    "timestamp",
+                    0
+                ),
+
+            "stato": stato,
+
+            "casa_id":
+                teams
+                .get("home", {})
+                .get("id"),
+
+            "trasferta_id":
+                teams
+                .get("away", {})
+                .get("id")
+
         })
+
+
+    # ========================================================
+    # ORDINA PER DATA
+    # ========================================================
 
     partite.sort(
-        key=lambda partita: (
-            partita.get("date") or "",
-            partita.get("time") or ""
+
+        key=lambda x:
+        x.get(
+            "timestamp",
+            0
         )
+
     )
 
-    return partite[:NUMERO_PARTITE_REPORT]
+
+    # ========================================================
+    # ELIMINA DUPLICATI
+    # ========================================================
+
+    uniche = []
+
+    ids_visti = set()
 
 
-# ============================================================
-# RECUPERO CALENDARIO PRINCIPALE
-# ============================================================
+    for partita in partite:
 
-def recupera_partite(nome_campionato):
+        if partita["id"] in ids_visti:
 
-    print()
-    print("==========================================")
-    print("⚽ RICERCA PROSSIME PARTITE")
-    print("==========================================")
-
-    # --------------------------------------------------------
-    # PRIORITÀ 1: THESPORTSDB
-    # --------------------------------------------------------
-
-    partite = recupera_partite_sportsdb(
-        nome_campionato
-    )
-
-    if partite:
-        print()
-        print("✅ CALENDARIO RECUPERATO DA THESPORTSDB.")
-        return partite
-
-    # --------------------------------------------------------
-    # PRIORITÀ 2: API-FOOTBALL
-    # --------------------------------------------------------
-
-    print()
-    print("⚠️ TheSportsDB non ha restituito partite.")
-    print("🔎 Provo API-Football come seconda fonte...")
-
-    partite = recupera_partite_api_football(
-        nome_campionato
-    )
-
-    if partite:
-        print()
-        print("✅ CALENDARIO RECUPERATO DA API-FOOTBALL.")
-        return partite
-
-    # --------------------------------------------------------
-    # NESSUNA FONTE DISPONIBILE
-    # --------------------------------------------------------
-
-    print()
-    print("❌ Nessuna fonte ha restituito il calendario.")
-
-    return []
-
-
-# ============================================================
-# RECUPERO FORMA SQUADRA
-# ============================================================
-
-def trova_team_id(nome_squadra):
-
-    if not nome_squadra:
-        return None
-
-    dati = api_football_get(
-        "teams",
-        {
-            "search": nome_squadra
-        }
-    )
-
-    if not isinstance(dati, dict):
-        return None
-
-    risultati = dati.get("response") or []
-
-    if not risultati:
-        return None
-
-    try:
-        return risultati[0]["team"]["id"]
-    except Exception:
-        return None
-
-
-def recupera_form_squadra(nome_squadra):
-
-    team_id = trova_team_id(nome_squadra)
-
-    if not team_id:
-        return []
-
-    dati = api_football_get(
-        "fixtures",
-        {
-            "team": team_id,
-            "last": NUMERO_PARTITE_FORM,
-            "status": "FT"
-        }
-    )
-
-    if not isinstance(dati, dict):
-        return []
-
-    if dati.get("errors"):
-        print(
-            "⚠️ Errore recupero forma:",
-            dati.get("errors")
-        )
-        return []
-
-    risultati = dati.get("response") or []
-
-    forma = []
-
-    for partita in risultati:
-
-        teams = partita.get("teams") or {}
-        goals = partita.get("goals") or {}
-
-        casa = teams.get("home") or {}
-        trasferta = teams.get("away") or {}
-
-        nome_casa = casa.get("name")
-        nome_trasferta = trasferta.get("name")
-
-        gol_casa = goals.get("home")
-        gol_trasferta = goals.get("away")
-
-        if gol_casa is None or gol_trasferta is None:
             continue
 
-        if nome_squadra.lower() == str(nome_casa).lower():
-            fatti = gol_casa
-            subiti = gol_trasferta
-            vittoria = gol_casa > gol_trasferta
+        ids_visti.add(
+            partita["id"]
+        )
+
+        uniche.append(
+            partita
+        )
+
+
+    uniche = uniche[
+        :NUMERO_PARTITE_REPORT
+    ]
+
+
+    print(
+        f"✅ Prossime partite trovate: "
+        f"{len(uniche)}",
+        flush=True
+    )
+
+
+    for partita in uniche:
+
+        print(
+
+            f"⚽ {partita['casa']} - "
+            f"{partita['trasferta']} | "
+            f"{formatta_data(partita['data'])}",
+
+            flush=True
+
+        )
+
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+
+    return uniche
+
+
+# ============================================================
+# RECUPERA FORMA RECENTE
+# ============================================================
+
+def recupera_form_squadra(
+    team_id
+):
+
+    if not team_id:
+
+        return []
+
+
+    chiave = (
+        "form",
+        team_id
+    )
+
+
+    cached = cache_get(
+        chiave
+    )
+
+
+    if cached is not None:
+
+        return cached
+
+
+    print(
+        f"📈 Recupero ultime "
+        f"{NUMERO_PARTITE_FORM} partite "
+        f"della squadra {team_id}",
+        flush=True
+    )
+
+
+    dados = api_get(
+
+        "fixtures",
+
+        {
+            "team": team_id,
+            "last": NUMERO_PARTITE_FORM
+        }
+
+    )
+
+
+    if not dados:
+
+        return []
+
+
+    eventi = dados.get(
+        "response",
+        []
+    )
+
+
+    risultati = []
+
+
+    for evento in eventi:
+
+        fixture = evento.get(
+            "fixture",
+            {}
+        )
+
+        teams = evento.get(
+            "teams",
+            {}
+        )
+
+        goals = evento.get(
+            "goals",
+            {}
+        )
+
+
+        squadra_casa = (
+            teams
+            .get("home", {})
+            .get("id")
+        )
+
+        squadra_trasferta = (
+            teams
+            .get("away", {})
+            .get("id")
+        )
+
+
+        if (
+            squadra_casa != team_id
+            and
+            squadra_trasferta != team_id
+        ):
+
+            continue
+
+
+        stato = (
+            fixture
+            .get("status", {})
+            .get("short", "")
+        )
+
+
+        if stato not in (
+            "FT",
+            "AET",
+            "PEN"
+        ):
+
+            continue
+
+
+        gol_casa = goals.get(
+            "home"
+        )
+
+        gol_trasferta = goals.get(
+            "away"
+        )
+
+
+        if gol_casa is None:
+            continue
+
+        if gol_trasferta is None:
+            continue
+
+
+        if squadra_casa == team_id:
+
+            gol_fatti = gol_casa
+
+            gol_subiti = gol_trasferta
+
+            casa = True
 
         else:
-            fatti = gol_trasferta
-            subiti = gol_casa
-            vittoria = gol_trasferta > gol_casa
 
-        pareggio = gol_casa == gol_trasferta
+            gol_fatti = gol_trasferta
 
-        forma.append({
-            "fatti": fatti,
-            "subiti": subiti,
-            "vittoria": vittoria,
-            "pareggio": pareggio
+            gol_subiti = gol_casa
+
+            casa = False
+
+
+        if gol_fatti > gol_subiti:
+
+            risultato = "V"
+
+        elif gol_fatti == gol_subiti:
+
+            risultato = "N"
+
+        else:
+
+            risultato = "P"
+
+
+        risultati.append({
+
+            "risultato":
+                risultato,
+
+            "gol_fatti":
+                gol_fatti,
+
+            "gol_subiti":
+                gol_subiti,
+
+            "casa":
+                casa,
+
+            "data":
+                fixture.get(
+                    "date",
+                    ""
+                )
+
         })
 
-    return forma
+
+    risultati.sort(
+
+        key=lambda x:
+        x.get(
+            "data",
+            ""
+        ),
+
+        reverse=True
+
+    )
+
+
+    risultati = risultati[
+        :NUMERO_PARTITE_FORM
+    ]
+
+
+    cache_set(
+        chiave,
+        risultati
+    )
+
+
+    return risultati
 
 
 # ============================================================
-# CALCOLO STATISTICO
+# CALCOLO STATISTICHE
 # ============================================================
 
-def analizza_form(forma):
+def calcola_statistiche(
+    partite
+):
 
-    if not forma:
+    if not partite:
+
         return {
+
             "partite": 0,
-            "media_fatti": 0,
-            "media_subiti": 0,
+
             "vittorie": 0,
+
             "pareggi": 0,
-            "sconfitte": 0
+
+            "sconfitte": 0,
+
+            "gol_fatti": 0,
+
+            "gol_subiti": 0,
+
+            "media_gol_fatti": 0.0,
+
+            "media_gol_subiti": 0.0,
+
+            "punti_media": 0.0,
+
+            "forma": "",
+
+            "over15": 0,
+
+            "over25": 0,
+
+            "gol": 0
+
         }
+
 
     vittorie = sum(
-        1 for x in forma
-        if x["vittoria"]
+
+        1
+        for p in partite
+
+        if p["risultato"] == "V"
+
     )
+
 
     pareggi = sum(
-        1 for x in forma
-        if x["pareggio"]
+
+        1
+        for p in partite
+
+        if p["risultato"] == "N"
+
     )
 
-    sconfitte = (
-        len(forma)
-        - vittorie
-        - pareggi
+
+    sconfitte = sum(
+
+        1
+        for p in partite
+
+        if p["risultato"] == "P"
+
     )
 
-    media_fatti = (
-        sum(x["fatti"] for x in forma)
-        / len(forma)
+
+    gol_fatti = sum(
+
+        p["gol_fatti"]
+        for p in partite
+
     )
 
-    media_subiti = (
-        sum(x["subiti"] for x in forma)
-        / len(forma)
+
+    gol_subiti = sum(
+
+        p["gol_subiti"]
+        for p in partite
+
     )
+
+
+    numero = len(
+        partite
+    )
+
+
+    over15 = sum(
+
+        1
+        for p in partite
+
+        if (
+            p["gol_fatti"]
+            + p["gol_subiti"]
+        ) >= 2
+
+    )
+
+
+    over25 = sum(
+
+        1
+        for p in partite
+
+        if (
+            p["gol_fatti"]
+            + p["gol_subiti"]
+        ) >= 3
+
+    )
+
+
+    gol = sum(
+
+        1
+        for p in partite
+
+        if (
+            p["gol_fatti"] > 0
+            and
+            p["gol_subiti"] > 0
+        )
+
+    )
+
+
+    punti = (
+        vittorie * 3
+        + pareggi
+    )
+
 
     return {
-        "partite": len(forma),
-        "media_fatti": media_fatti,
-        "media_subiti": media_subiti,
-        "vittorie": vittorie,
-        "pareggi": pareggi,
-        "sconfitte": sconfitte
+
+        "partite":
+            numero,
+
+        "vittorie":
+            vittorie,
+
+        "pareggi":
+            pareggi,
+
+        "sconfitte":
+            sconfitte,
+
+        "gol_fatti":
+            gol_fatti,
+
+        "gol_subiti":
+            gol_subiti,
+
+        "media_gol_fatti":
+            gol_fatti / numero,
+
+        "media_gol_subiti":
+            gol_subiti / numero,
+
+        "punti_media":
+            punti / numero,
+
+        "forma":
+            "".join(
+                p["risultato"]
+                for p in partite[:5]
+            ),
+
+        "over15":
+            over15,
+
+        "over25":
+            over25,
+
+        "gol":
+            gol
+
     }
 
 
 # ============================================================
-# PREVISIONE STATISTICA
+# RECUPERA PRONOSTICO API-FOOTBALL
 # ============================================================
 
-def previsione_statistica(nome_casa, nome_trasferta):
+def recupera_pronostico_api(
+    fixture_id
+):
 
-    print()
     print(
-        "📊 Analisi statistica:",
-        nome_casa,
-        "-",
-        nome_trasferta
+        f"🔮 Recupero pronostico "
+        f"fixture {fixture_id}",
+        flush=True
     )
 
-    form_casa = recupera_form_squadra(nome_casa)
-    form_trasferta = recupera_form_squadra(nome_trasferta)
 
-    analisi_casa = analizza_form(form_casa)
-    analisi_trasferta = analizza_form(form_trasferta)
+    dati = api_get(
 
-    if (
-        analisi_casa["partite"] == 0
-        and analisi_trasferta["partite"] == 0
-    ):
-        return {
-            "esito": "N/D",
-            "gol": "N/D",
-            "over_under": "N/D",
-            "confidence": 0,
-            "metodo": "Dati statistici insufficienti"
-        }
-
-    forza_casa = (
-        analisi_casa["media_fatti"]
-        - analisi_casa["media_subiti"]
-    )
-
-    forza_trasferta = (
-        analisi_trasferta["media_fatti"]
-        - analisi_trasferta["media_subiti"]
-    )
-
-    # Vantaggio campo
-    differenza = forza_casa - forza_trasferta + 0.25
-
-    if differenza > 0.35:
-        esito = "1"
-    elif differenza < -0.35:
-        esito = "2"
-    else:
-        esito = "X"
-
-    media_gol = (
-        analisi_casa["media_fatti"]
-        + analisi_trasferta["media_fatti"]
-        + analisi_casa["media_subiti"]
-        + analisi_trasferta["media_subiti"]
-    ) / 2
-
-    if media_gol >= 2.5:
-        over_under = "Over 2.5"
-    else:
-        over_under = "Under 2.5"
-
-    if esito == "1":
-        gol = "2-1"
-    elif esito == "2":
-        gol = "1-2"
-    else:
-        gol = "1-1"
-
-    partite_disponibili = (
-        analisi_casa["partite"]
-        + analisi_trasferta["partite"]
-    )
-
-    confidence = min(
-        85,
-        45 + partite_disponibili * 2
-    )
-
-    return {
-        "esito": esito,
-        "gol": gol,
-        "over_under": over_under,
-        "confidence": confidence,
-        "metodo": "Analisi statistica forma recente"
-    }
-
-
-# ============================================================
-# PREVISIONE API-FOOTBALL
-# ============================================================
-
-def previsione_api_football(fixture_id):
-
-    if not fixture_id:
-        return None
-
-    print()
-    print(
-        "🔮 API-FOOTBALL PREDICTION:",
-        fixture_id
-    )
-
-    dati = api_football_get(
         "predictions",
+
         {
             "fixture": fixture_id
         }
+
     )
 
-    if not isinstance(dati, dict):
+
+    if not dati:
+
         return None
 
-    if dati.get("errors"):
+
+    risposta = dati.get(
+        "response",
+        []
+    )
+
+
+    if not risposta:
+
         print(
-            "⚠️ Errore predictions:",
-            dati.get("errors")
+            "⚠️ Nessun pronostico API-Football.",
+            flush=True
         )
+
         return None
 
-    risultati = dati.get("response") or []
 
-    if not risultati:
-        print("⚠️ Nessuna previsione API-Football.")
-        return None
+    previsione = risposta[0]
 
-    try:
-        prediction = risultati[0].get("predictions") or {}
 
-        vincente = prediction.get("winner") or {}
+    return previsione
 
-        nome_vincente = vincente.get("name")
 
-        percentuali = prediction.get("percent") or {}
+# ============================================================
+# PRONOSTICO STATISTICO DI RISERVA
+# ============================================================
 
-        home_percent = percentuali.get("home")
-        draw_percent = percentuali.get("draw")
-        away_percent = percentuali.get("away")
+def genera_pronostico_statistico(
+    stats_casa,
+    stats_trasferta
+):
+
+    if (
+        stats_casa["partite"] == 0
+        or
+        stats_trasferta["partite"] == 0
+    ):
 
         return {
-            "winner": nome_vincente,
-            "home_percent": home_percent,
-            "draw_percent": draw_percent,
-            "away_percent": away_percent,
-            "goals": prediction.get("goals"),
-            "advice": prediction.get("advice")
+
+            "esito":
+                "N/D",
+
+            "over25":
+                "N/D",
+
+            "gol":
+                "N/D",
+
+            "confidence":
+                0,
+
+            "motivazione":
+                "Dati statistici insufficienti."
+
         }
 
-    except Exception as errore:
-        print(
-            "⚠️ Errore parsing prediction:",
-            errore
-        )
-        return None
 
+    forza_casa = (
 
-# ============================================================
-# GENERAZIONE PREVISIONE
-# ============================================================
+        stats_casa["punti_media"] * 10
 
-def genera_previsione(partita):
+        + stats_casa["media_gol_fatti"] * 3
 
-    casa = partita.get("home", "Casa")
-    trasferta = partita.get("away", "Trasferta")
+        - stats_casa["media_gol_subiti"] * 2
 
-    fixture_id = partita.get("id")
+        + 2
 
-    # Prima proviamo API-Football
-    previsione_api = previsione_api_football(
-        fixture_id
     )
 
-    if previsione_api:
 
-        winner = previsione_api.get("winner")
+    forza_trasferta = (
 
-        home_percent = previsione_api.get(
-            "home_percent"
+        stats_trasferta["punti_media"] * 10
+
+        + stats_trasferta["media_gol_fatti"] * 3
+
+        - stats_trasferta["media_gol_subiti"] * 2
+
+    )
+
+
+    differenza = (
+        forza_casa
+        - forza_trasferta
+    )
+
+
+    if differenza >= 3:
+
+        esito = "1"
+
+    elif differenza >= 1:
+
+        esito = "1X"
+
+    elif differenza <= -3:
+
+        esito = "2"
+
+    elif differenza <= -1:
+
+        esito = "X2"
+
+    else:
+
+        esito = "X"
+
+
+    media_gol_totale = (
+
+        stats_casa["media_gol_fatti"]
+
+        + stats_casa["media_gol_subiti"]
+
+        + stats_trasferta["media_gol_fatti"]
+
+        + stats_trasferta["media_gol_subiti"]
+
+    ) / 2
+
+
+    if media_gol_totale >= 2.7:
+
+        over25 = "OVER 2.5"
+
+    elif media_gol_totale >= 2.2:
+
+        over25 = "OVER 1.5"
+
+    else:
+
+        over25 = "UNDER 2.5"
+
+
+    if (
+
+        stats_casa["media_gol_fatti"] >= 1.1
+
+        and
+
+        stats_trasferta["media_gol_fatti"] >= 1.0
+
+    ):
+
+        gol = "GOL"
+
+    else:
+
+        gol = "NO GOL"
+
+
+    confidence = 50
+
+
+    if abs(differenza) >= 3:
+
+        confidence += 15
+
+    elif abs(differenza) >= 1.5:
+
+        confidence += 10
+
+
+    if media_gol_totale >= 2.5:
+
+        confidence += 5
+
+
+    if (
+
+        stats_casa["partite"] >= 5
+
+        and
+
+        stats_trasferta["partite"] >= 5
+
+    ):
+
+        confidence += 5
+
+
+    confidence = min(
+        confidence,
+        85
+    )
+
+
+    return {
+
+        "esito":
+            esito,
+
+        "over25":
+            over25,
+
+        "gol":
+            gol,
+
+        "confidence":
+            confidence,
+
+        "motivazione":
+            "Pronostico statistico basato "
+            "sulla forma recente."
+
+    }
+
+
+# ============================================================
+# ESTRAE DATI DAL PRONOSTICO API-FOOTBALL
+# ============================================================
+
+def interpreta_pronostico(
+    dati_api,
+    stats_casa,
+    stats_trasferta
+):
+
+    if not dati_api:
+
+        return genera_pronostico_statistico(
+            stats_casa,
+            stats_trasferta
         )
 
-        draw_percent = previsione_api.get(
-            "draw_percent"
+
+    predictions = dati_api.get(
+        "predictions",
+        {}
+    )
+
+
+    winner = predictions.get(
+        "winner",
+        {}
+    )
+
+
+    esito_api = winner.get(
+        "name"
+    )
+
+
+    percentuali = predictions.get(
+        "percent"
+    ) or {}
+
+
+    percentuale_casa = percentuali.get(
+        "home"
+    )
+
+
+    percentuale_pareggio = percentuali.get(
+        "draw"
+    )
+
+
+    percentuale_trasferta = percentuali.get(
+        "away"
+    )
+
+
+    consiglio = predictions.get(
+        "advice"
+    )
+
+
+    under_over = predictions.get(
+        "under_over"
+    )
+
+
+    gol = predictions.get(
+        "goals",
+        {}
+    )
+
+
+    gol_casa = gol.get(
+        "home"
+    )
+
+
+    gol_trasferta = gol.get(
+        "away"
+    )
+
+
+    # ========================================================
+    # ESITO
+    # ========================================================
+
+    if esito_api:
+
+        esito_lower = (
+            str(esito_api)
+            .lower()
         )
 
-        away_percent = previsione_api.get(
-            "away_percent"
+        if "home" in esito_lower:
+
+            esito = "1"
+
+        elif "away" in esito_lower:
+
+            esito = "2"
+
+        elif "draw" in esito_lower:
+
+            esito = "X"
+
+        else:
+
+            esito = esito_api
+
+    else:
+
+        fallback = genera_pronostico_statistico(
+            stats_casa,
+            stats_trasferta
         )
 
-        if winner:
+        esito = fallback["esito"]
 
-            if home_percent is None:
-                home_percent = "N/D"
 
-            if draw_percent is None:
-                draw_percent = "N/D"
+    # ========================================================
+    # OVER / UNDER
+    # ========================================================
 
-            if away_percent is None:
-                away_percent = "N/D"
+    if under_over:
 
-            advice = (
-                previsione_api.get("advice")
-                or "Analisi API-Football"
-            )
+        over25 = str(
+            under_over
+        ).upper()
 
-            return {
-                "esito": winner,
-                "gol": "N/D",
-                "over_under": "N/D",
-                "confidence": "API",
-                "metodo": "API-Football",
-                "extra": (
-                    f"1: {home_percent} | "
-                    f"X: {draw_percent} | "
-                    f"2: {away_percent}\n"
-                    f"Consiglio: {advice}"
+    else:
+
+        media_totale = (
+
+            stats_casa["media_gol_fatti"]
+
+            + stats_casa["media_gol_subiti"]
+
+            + stats_trasferta["media_gol_fatti"]
+
+            + stats_trasferta["media_gol_subiti"]
+
+        ) / 2
+
+
+        if media_totale >= 2.7:
+
+            over25 = "OVER 2.5"
+
+        elif media_totale >= 2.2:
+
+            over25 = "OVER 1.5"
+
+        else:
+
+            over25 = "UNDER 2.5"
+
+
+    # ========================================================
+    # GOL / NO GOL
+    # ========================================================
+
+    gol_api = predictions.get(
+        "both_teams_score"
+    )
+
+
+    if gol_api is True:
+
+        gol = "GOL"
+
+    elif gol_api is False:
+
+        gol = "NO GOL"
+
+    else:
+
+        if (
+
+            stats_casa["media_gol_fatti"] >= 1.1
+
+            and
+
+            stats_trasferta["media_gol_fatti"] >= 1.0
+
+        ):
+
+            gol = "GOL"
+
+        else:
+
+            gol = "NO GOL"
+
+
+    # ========================================================
+    # AFFIDABILITÀ
+    # ========================================================
+
+    confidence = 55
+
+
+    valori_percentuali = []
+
+
+    for valore in (
+
+        percentuale_casa,
+        percentuale_pareggio,
+        percentuale_trasferta
+
+    ):
+
+        if valore:
+
+            try:
+
+                valore_numero = float(
+                    str(valore)
+                    .replace("%", "")
+                    .strip()
                 )
-            }
 
-    # --------------------------------------------------------
-    # FALLBACK STATISTICO
-    # --------------------------------------------------------
+                valori_percentuali.append(
+                    valore_numero
+                )
 
-    statistica = previsione_statistica(
-        casa,
-        trasferta
+            except Exception:
+
+                pass
+
+
+    if valori_percentuali:
+
+        confidence = int(
+            max(
+                valori_percentuali
+            )
+        )
+
+
+    confidence = max(
+        30,
+        min(
+            confidence,
+            90
+        )
     )
 
-    statistica["extra"] = ""
 
-    return statistica
+    # ========================================================
+    # MOTIVAZIONE
+    # ========================================================
+
+    motivazione_parts = []
+
+
+    if consiglio:
+
+        motivazione_parts.append(
+            str(consiglio)
+        )
+
+
+    if percentuale_casa:
+
+        motivazione_parts.append(
+            f"1: {percentuale_casa}"
+        )
+
+
+    if percentuale_pareggio:
+
+        motivazione_parts.append(
+            f"X: {percentuale_pareggio}"
+        )
+
+
+    if percentuale_trasferta:
+
+        motivazione_parts.append(
+            f"2: {percentuale_trasferta}"
+        )
+
+
+    if (
+        gol_casa
+        or
+        gol_trasferta
+    ):
+
+        motivazione_parts.append(
+
+            "Gol previsti: "
+            f"{gol_casa or '?'}-"
+            f"{gol_trasferta or '?'}"
+
+        )
+
+
+    motivazione = " | ".join(
+        motivazione_parts
+    )
+
+
+    if not motivazione:
+
+        motivazione = (
+            "Pronostico elaborato "
+            "sulla base dei dati disponibili."
+        )
+
+
+    return {
+
+        "esito":
+            esito,
+
+        "over25":
+            over25,
+
+        "gol":
+            gol,
+
+        "confidence":
+            confidence,
+
+        "motivazione":
+            motivazione,
+
+        "percentuale_casa":
+            percentuale_casa,
+
+        "percentuale_pareggio":
+            percentuale_pareggio,
+
+        "percentuale_trasferta":
+            percentuale_trasferta,
+
+        "consiglio":
+            consiglio,
+
+        "gol_casa":
+            gol_casa,
+
+        "gol_trasferta":
+            gol_trasferta
+
+    }
 
 
 # ============================================================
-# FORMATTA PARTITA
+# ANALISI COMPLETA DELLA PARTITA
 # ============================================================
 
-def formatta_partita(partita, numero):
+def analizza_partita(
+    partita
+):
 
-    casa = partita.get("home", "Casa")
-    trasferta = partita.get("away", "Trasferta")
+    casa = partita[
+        "casa"
+    ]
 
-    data = partita.get("date")
-    ora = partita.get("time")
+    trasferta = partita[
+        "trasferta"
+    ]
 
-    data_formattata = formatta_data(
-        data,
-        ora
+
+    casa_id = partita.get(
+        "casa_id"
     )
 
-    previsione = genera_previsione(
-        partita
+    trasferta_id = partita.get(
+        "trasferta_id"
     )
 
-    esito = previsione.get(
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+    print(
+        f"📊 ANALISI: "
+        f"{casa} - {trasferta}",
+        flush=True
+    )
+
+
+    form_casa = recupera_form_squadra(
+        casa_id
+    )
+
+    form_trasferta = recupera_form_squadra(
+        trasferta_id
+    )
+
+
+    stats_casa = calcola_statistiche(
+        form_casa
+    )
+
+    stats_trasferta = calcola_statistiche(
+        form_trasferta
+    )
+
+
+    print(
+        f"🏠 {casa}: "
+        f"{stats_casa['forma']} | "
+        f"GF {stats_casa['media_gol_fatti']:.2f} | "
+        f"GS {stats_casa['media_gol_subiti']:.2f}",
+        flush=True
+    )
+
+
+    print(
+        f"✈️ {trasferta}: "
+        f"{stats_trasferta['forma']} | "
+        f"GF {stats_trasferta['media_gol_fatti']:.2f} | "
+        f"GS {stats_trasferta['media_gol_subiti']:.2f}",
+        flush=True
+    )
+
+
+    dati_api = recupera_pronostico_api(
+        partita["id"]
+    )
+
+
+    pronostico = interpreta_pronostico(
+        dati_api,
+        stats_casa,
+        stats_trasferta
+    )
+
+
+    return {
+
+        "partita":
+            partita,
+
+        "stats_casa":
+            stats_casa,
+
+        "stats_trasferta":
+            stats_trasferta,
+
+        "pronostico":
+            pronostico
+
+    }
+
+
+# ============================================================
+# FORMATTA PRONOSTICO
+# ============================================================
+
+def formatta_pronostico(
+    analisi
+):
+
+    pronostico = analisi[
+        "pronostico"
+    ]
+
+    stats_casa = analisi[
+        "stats_casa"
+    ]
+
+    stats_trasferta = analisi[
+        "stats_trasferta"
+    ]
+
+
+    esito = pronostico.get(
         "esito",
         "N/D"
     )
 
-    gol = previsione.get(
+    gol = pronostico.get(
         "gol",
         "N/D"
     )
 
-    over_under = previsione.get(
-        "over_under",
+    over25 = pronostico.get(
+        "over25",
         "N/D"
     )
 
-    confidence = previsione.get(
+    confidence = pronostico.get(
         "confidence",
-        "N/D"
+        0
     )
 
-    metodo = previsione.get(
-        "metodo",
-        ""
-    )
-
-    extra = previsione.get(
-        "extra",
-        ""
-    )
 
     testo = (
-        f"<b>{numero}. {casa} - {trasferta}</b>\n"
-        f"📅 {data_formattata}\n"
-        f"🎯 <b>Pronostico:</b> {esito}\n"
-        f"⚽ <b>Risultato:</b> {gol}\n"
-        f"📈 <b>Over/Under:</b> {over_under}\n"
-        f"📊 <b>Affidabilità:</b> {confidence}\n"
-        f"🔎 <b>Metodo:</b> {metodo}"
+
+        "🔮 <b>PRONOSTICO</b>\n"
+
+        f"🎯 <b>Esito:</b> {esito}\n"
+
+        f"⚽ <b>Gol:</b> {gol}\n"
+
+        f"📈 <b>Totale:</b> {over25}\n"
+
+        f"💯 <b>Affidabilità:</b> "
+        f"{confidence}%"
+
     )
 
-    if extra:
-        testo += f"\n{extra}"
+
+    pc = pronostico.get(
+        "percentuale_casa"
+    )
+
+    px = pronostico.get(
+        "percentuale_pareggio"
+    )
+
+    pt = pronostico.get(
+        "percentuale_trasferta"
+    )
+
+
+    if (
+        pc
+        or px
+        or pt
+    ):
+
+        testo += (
+
+            "\n\n📊 <b>Probabilità:</b>\n"
+
+            f"1: {pc or 'N/D'}\n"
+
+            f"X: {px or 'N/D'}\n"
+
+            f"2: {pt or 'N/D'}"
+
+        )
+
+
+    testo += (
+
+        "\n\n📈 <b>FORMA RECENTE</b>\n"
+
+        f"🏠 {stats_casa['forma'] or 'N/D'}\n"
+
+        f"✈️ {stats_trasferta['forma'] or 'N/D'}"
+
+    )
+
+
+    motivazione = pronostico.get(
+        "motivazione"
+    )
+
+
+    if motivazione:
+
+        testo += (
+
+            "\n\n💡 <b>Analisi:</b>\n"
+
+            f"{motivazione}"
+
+        )
+
+
+    gol_casa = pronostico.get(
+        "gol_casa"
+    )
+
+    gol_trasferta = pronostico.get(
+        "gol_trasferta"
+    )
+
+
+    if (
+        gol_casa is not None
+        or
+        gol_trasferta is not None
+    ):
+
+        testo += (
+
+            "\n\n⚽ <b>Gol previsti:</b> "
+
+            f"{gol_casa or '?'}-"
+            f"{gol_trasferta or '?'}"
+
+        )
+
 
     return testo
 
 
 # ============================================================
-# CREAZIONE REPORT
+# CREA REPORT
 # ============================================================
 
-def crea_report(nome_campionato):
+def crea_report(
+    nome_campionato,
+    league_id
+):
 
-    campionato = CAMPIONATI.get(
-        nome_campionato.lower()
+    print(
+        "==========================================",
+        flush=True
     )
 
-    if not campionato:
-        return (
-            "❌ Campionato non riconosciuto.\n\n"
-            "Usa /campionati per vedere quelli disponibili."
-        )
+    print(
+        f"🚨 CREAZIONE REPORT: "
+        f"{nome_campionato}",
+        flush=True
+    )
 
-    print()
-    print("==========================================")
-    print("🚨 CREAZIONE REPORT:", campionato["nome"])
-    print("==========================================")
 
     partite = recupera_partite(
-        nome_campionato
+        league_id
     )
 
-    # --------------------------------------------------------
-    # NESSUNA PARTITA
-    # --------------------------------------------------------
 
     if not partite:
 
-        report = (
-            f"⚽ <b>PRONOSTICI {campionato['nome']}</b>\n\n"
-            "❌ Non sono riuscito a recuperare "
-            "le prossime partite.\n\n"
-            "🔎 Ho controllato:\n"
-            "• TheSportsDB\n"
-            "• API-Football\n\n"
-            "⚠️ API-Football Free limita l'accesso "
-            "alla stagione corrente."
+        return (
+
+            f"⚽ <b>{nome_campionato}</b>\n\n"
+
+            "❌ API-Football non ha restituito "
+            "partite future disponibili.\n\n"
+
+            "ℹ️ Il piano Free di API-Football "
+            "potrebbe non consentire l'accesso "
+            "alla stagione corrente.\n\n"
+
+            "🔧 Il bot e Telegram funzionano "
+            "correttamente."
+
         )
 
-        return report
 
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
+    messaggio = [
 
-    righe = []
+        f"⚽ <b>{nome_campionato}</b>",
 
-    righe.append(
-        f"⚽ <b>PRONOSTICI {campionato['nome']}</b>"
-    )
+        "",
 
-    righe.append("")
+        "🔮 <b>PRONOSTICI CALCIO</b>",
 
-    righe.append(
-        "📅 <b>PROSSIME PARTITE</b>"
-    )
+        "",
 
-    righe.append("")
+        "⚠️ Pronostici statistici: "
+        "non costituiscono garanzia "
+        "del risultato."
 
-    righe.append(
-        "⚠️ Pronostici a scopo statistico."
-    )
+    ]
 
-    righe.append("")
 
     for indice, partita in enumerate(
         partite,
@@ -1290,860 +2107,1122 @@ def crea_report(nome_campionato):
     ):
 
         print(
-            f"🔮 Elaborazione partita "
+            f"🏁 Analisi "
             f"{indice}/{len(partite)}: "
-            f"{partita['home']} - {partita['away']}"
+            f"{partita['casa']} - "
+            f"{partita['trasferta']}",
+            flush=True
         )
+
 
         try:
 
-            testo_partita = formatta_partita(
-                partita,
-                indice
+            analisi = analizza_partita(
+                partita
             )
 
-            righe.append(
-                testo_partita
+
+            data = formatta_data(
+                partita["data"]
             )
 
-            righe.append("")
 
-        except Exception as errore:
+            messaggio.append(
+                ""
+            )
+
+
+            messaggio.append(
+
+                f"📅 <b>{data}</b>\n"
+
+                f"🏠 <b>{partita['casa']}</b>\n"
+
+                f"✈️ <b>{partita['trasferta']}</b>\n\n"
+
+                f"{formatta_pronostico(analisi)}"
+
+            )
+
+
+            messaggio.append(
+                "━━━━━━━━━━━━━━━━━━"
+            )
+
+
+        except Exception as e:
 
             print(
-                "❌ Errore elaborazione partita:",
-                errore
+                f"❌ Errore analisi "
+                f"{partita['id']}: {e}",
+                flush=True
             )
 
-            righe.append(
-                f"<b>{indice}. "
-                f"{partita.get('home')} - "
-                f"{partita.get('away')}</b>\n"
-                "⚠️ Analisi non disponibile."
+
+            messaggio.append(
+
+                f"📅 <b>"
+                f"{formatta_data(partita['data'])}"
+                f"</b>\n"
+
+                f"🏠 {partita['casa']}\n"
+
+                f"✈️ {partita['trasferta']}\n\n"
+
+                "❌ Pronostico non disponibile."
+
             )
 
-            righe.append("")
 
-    righe.append(
-        "━━━━━━━━━━━━━━━━━━━━"
+            messaggio.append(
+                "━━━━━━━━━━━━━━━━━━"
+            )
+
+
+    messaggio.append(
+        ""
     )
 
-    righe.append(
-        "🤖 <b>Bot Pronostici Calcio</b>"
+
+    messaggio.append(
+
+        "🤖 <i>Elaborazione automatica "
+        "tramite API-Football.</i>"
+
     )
 
-    report = "\n".join(righe)
 
-    print()
-    print("📨 Report finale creato.")
-    print(
-        "📏 Lunghezza report:",
-        len(report),
-        "caratteri"
+    return "\n".join(
+        messaggio
     )
-
-    return report
 
 
 # ============================================================
-# INVIO MESSAGGI TELEGRAM
+# DIVISIONE MESSAGGI TELEGRAM
 # ============================================================
 
-def invia_report(chat_id, report):
+def dividi_messaggio(
+    testo,
+    limite=3900
+):
 
-    # Telegram consente messaggi fino a circa 4096 caratteri.
-    # Usiamo un margine di sicurezza.
+    if len(testo) <= limite:
 
-    limite = 3900
+        return [testo]
 
-    parti = []
 
-    testo = report
+    blocchi = []
 
-    while len(testo) > limite:
+    rimanente = testo
 
-        posizione = testo.rfind(
-            "\n",
+
+    while len(rimanente) > limite:
+
+        posizione = rimanente.rfind(
+            "\n━━━━━━━━━━━━━━━━━━",
             0,
             limite
         )
 
+
         if posizione <= 0:
+
+            posizione = rimanente.rfind(
+                "\n",
+                0,
+                limite
+            )
+
+
+        if posizione <= 0:
+
             posizione = limite
 
-        parti.append(
-            testo[:posizione]
-        )
 
-        testo = testo[posizione:].lstrip()
-
-    if testo:
-        parti.append(testo)
-
-    totale = len(parti)
-
-    for indice, parte in enumerate(
-        parti,
-        start=1
-    ):
-
-        try:
-
-            print(
-                f"📤 Invio messaggio "
-                f"{indice}/{totale} ..."
-            )
-
-            bot.send_message(
-                chat_id,
-                parte
-            )
-
-            print(
-                f"✅ Messaggio "
-                f"{indice}/{totale} inviato."
-            )
-
-        except Exception as errore:
-
-            print(
-                f"❌ Errore invio messaggio "
-                f"{indice}:",
-                errore
-            )
-
-    print()
-    print("🏁 REPORT TELEGRAM INVIATO COMPLETAMENTE.")
-
-
-# ============================================================
-# MENU TELEGRAM
-# ============================================================
-
-def menu_principale():
-
-    return (
-        "⚽ <b>BOT PRONOSTICI CALCIO</b>\n\n"
-        "Benvenuto!\n\n"
-        "Scegli un campionato scrivendo:\n\n"
-        "🇮🇹 <b>Serie A</b>\n"
-        "🏴 <b>Premier League</b>\n"
-        "🇪🇸 <b>La Liga</b>\n"
-        "🇩🇪 <b>Bundesliga</b>\n"
-        "🇫🇷 <b>Ligue 1</b>\n\n"
-        "Oppure usa /campionati."
-    )
-
-
-def elenco_campionati():
-
-    return (
-        "🏆 <b>CAMPIONATI DISPONIBILI</b>\n\n"
-        "🇮🇹 Serie A\n"
-        "🏴 Premier League\n"
-        "🇪🇸 La Liga\n"
-        "🇩🇪 Bundesliga\n"
-        "🇫🇷 Ligue 1\n\n"
-        "Scrivi il nome del campionato "
-        "per ricevere i prossimi pronostici."
-    )
-
-
-# ============================================================
-# HANDLER /START
-# ============================================================
-
-@bot.message_handler(commands=["start"])
-def comando_start(message):
-
-    print()
-    print(
-        f"📩 /start ricevuto da chat "
-        f"{message.chat.id}"
-    )
-
-    try:
-
-        bot.send_message(
-            message.chat.id,
-            menu_principale()
-        )
-
-    except Exception as errore:
-
-        print(
-            "❌ Errore invio /start:",
-            errore
+        blocchi.append(
+            rimanente[:posizione]
         )
 
 
-# ============================================================
-# HANDLER /HELP
-# ============================================================
-
-@bot.message_handler(commands=["help"])
-def comando_help(message):
-
-    testo = (
-        "ℹ️ <b>COME USARE IL BOT</b>\n\n"
-        "Scrivi il nome di uno dei campionati "
-        "disponibili.\n\n"
-        "Esempio:\n"
-        "🇮🇹 Serie A\n\n"
-        "Il bot recupererà le prossime partite "
-        "e preparerà un report statistico."
-    )
-
-    try:
-        bot.send_message(
-            message.chat.id,
-            testo
-        )
-
-    except Exception as errore:
-
-        print(
-            "❌ Errore /help:",
-            errore
+        rimanente = (
+            rimanente[posizione:]
+            .lstrip()
         )
 
 
-# ============================================================
-# HANDLER /CAMPIONATI
-# ============================================================
+    if rimanente:
 
-@bot.message_handler(commands=["campionati"])
-def comando_campionati(message):
-
-    try:
-
-        bot.send_message(
-            message.chat.id,
-            elenco_campionati()
-        )
-
-    except Exception as errore:
-
-        print(
-            "❌ Errore /campionati:",
-            errore
+        blocchi.append(
+            rimanente
         )
 
 
-# ============================================================
-# NORMALIZZAZIONE NOME CAMPIONATO
-# ============================================================
-
-def riconosci_campionato(testo):
-
-    if not testo:
-        return None
-
-    testo = testo.lower().strip()
-
-    sostituzioni = {
-        "🇮🇹": "",
-        "🇬🇧": "",
-        "🏴": "",
-        "🇪🇸": "",
-        "🇩🇪": "",
-        "🇫🇷": "",
-        "serie a": "serie a",
-        "premier": "premier league",
-        "premier league": "premier league",
-        "la liga": "la liga",
-        "liga": "la liga",
-        "bundesliga": "bundesliga",
-        "ligue1": "ligue 1",
-        "ligue 1": "ligue 1"
-    }
-
-    for chiave, valore in sostituzioni.items():
-        testo = testo.replace(
-            chiave,
-            valore
-        )
-
-    testo = testo.strip()
-
-    if testo in CAMPIONATI:
-        return testo
-
-    return None
+    return blocchi
 
 
 # ============================================================
-# HANDLER MESSAGGI
+# /START
 # ============================================================
 
 @bot.message_handler(
-    func=lambda message: True,
-    content_types=["text"]
+    commands=["start"]
 )
-def gestione_messaggio(message):
+def comando_start(
+    message
+):
 
-    testo = message.text or ""
-
-    campionato = riconosci_campionato(
-        testo
+    print(
+        f"📩 /start ricevuto "
+        f"da chat {message.chat.id}",
+        flush=True
     )
 
-    if not campionato:
 
-        try:
+    testo = (
 
-            bot.send_message(
-                message.chat.id,
-                "❌ Campionato non riconosciuto.\n\n"
-                "Scrivi /campionati per vedere "
-                "quelli disponibili."
+        "⚽ <b>BOT PRONOSTICI CALCIO</b>\n\n"
+
+        "Benvenuto! 👋\n\n"
+
+        "Posso mostrarti le prossime "
+        "partite dei principali campionati "
+        "e creare pronostici statistici.\n\n"
+
+        "📋 Usa <b>/campionati</b> "
+        "per scegliere il campionato.\n\n"
+
+        "❓ Usa <b>/help</b> "
+        "per vedere i comandi disponibili."
+
+    )
+
+
+    bot.send_message(
+
+        message.chat.id,
+
+        testo,
+
+        parse_mode="HTML"
+
+    )
+
+
+# ============================================================
+# /HELP
+# ============================================================
+
+@bot.message_handler(
+    commands=["help"]
+)
+def comando_help(
+    message
+):
+
+    testo = (
+
+        "📖 <b>COMANDI DISPONIBILI</b>\n\n"
+
+        "/start - Avvia il bot\n"
+
+        "/campionati - Mostra i campionati\n"
+
+        "/help - Mostra questo messaggio\n\n"
+
+        "Puoi anche scrivere direttamente "
+        "il nome del campionato."
+
+    )
+
+
+    bot.send_message(
+
+        message.chat.id,
+
+        testo,
+
+        parse_mode="HTML"
+
+    )
+
+
+# ============================================================
+# /CAMPIONATI
+# ============================================================
+
+@bot.message_handler(
+    commands=["campionati"]
+)
+def comando_campionati(
+    message
+):
+
+    testo = (
+
+        "🏆 <b>SCEGLI IL CAMPIONATO</b>\n\n"
+
+        "🇮🇹 Serie A\n"
+
+        "🇬🇧 Premier League\n"
+
+        "🇪🇸 La Liga\n"
+
+        "🇩🇪 Bundesliga\n"
+
+        "🇫🇷 Ligue 1\n\n"
+
+        "Scrivi il nome del campionato "
+        "che vuoi analizzare."
+
+    )
+
+
+    bot.send_message(
+
+        message.chat.id,
+
+        testo,
+
+        parse_mode="HTML"
+
+    )
+
+
+# ============================================================
+# RICONOSCE IL CAMPIONATO
+# ============================================================
+
+def trova_campionato(
+    testo
+):
+
+    testo = (
+        testo
+        .strip()
+        .lower()
+    )
+
+
+    for nome, dati in CAMPIONATI.items():
+
+        nome_pulito = (
+
+            nome
+
+            .replace("🇮🇹", "")
+            .replace("🇬🇧", "")
+            .replace("🇪🇸", "")
+            .replace("🇩🇪", "")
+            .replace("🇫🇷", "")
+
+            .strip()
+            .lower()
+
+        )
+
+
+        if testo == nome_pulito:
+
+            return (
+                nome,
+                dati["id"]
             )
 
-        except Exception as errore:
 
-            print(
-                "❌ Errore risposta:",
-                errore
-            )
+    return (
+        None,
+        None
+    )
+
+
+# ============================================================
+# GESTIONE MESSAGGI
+# ============================================================
+
+@bot.message_handler(
+    func=lambda message: True
+)
+def gestione_messaggio(
+    message
+):
+
+    if not message.text:
 
         return
 
-    print()
+
+    testo_utente = (
+        message.text
+        .strip()
+        .lower()
+    )
+
+
+    nome_campionato, league_id = (
+        trova_campionato(
+            testo_utente
+        )
+    )
+
+
+    if not nome_campionato:
+
+        bot.send_message(
+
+            message.chat.id,
+
+            "❌ Campionato non riconosciuto.\n\n"
+
+            "Usa <b>/campionati</b> "
+            "per vedere quelli disponibili.",
+
+            parse_mode="HTML"
+
+        )
+
+        return
+
+
     print(
         f"📨 RICHIESTA CAMPIONATO: "
-        f"{CAMPIONATI[campionato]['nome']}"
+        f"{nome_campionato}",
+        flush=True
     )
+
+
+    messaggio_attesa = bot.send_message(
+
+        message.chat.id,
+
+        f"⏳ Analizzo "
+        f"<b>{nome_campionato}</b>...\n\n"
+
+        "Sto recuperando calendario, "
+        "forma recente e pronostici.\n\n"
+
+        "Attendi qualche secondo.",
+
+        parse_mode="HTML"
+
+    )
+
 
     try:
 
         report = crea_report(
-            campionato
+
+            nome_campionato,
+
+            league_id
+
         )
 
-        invia_report(
-            message.chat.id,
+
+        print(
+            "📨 Report finale creato.",
+            flush=True
+        )
+
+
+        print(
+            f"📏 Lunghezza report: "
+            f"{len(report)} caratteri",
+            flush=True
+        )
+
+
+        blocchi = dividi_messaggio(
             report
         )
 
-    except Exception as errore:
 
-        print()
-        print(
-            "❌ ERRORE CREAZIONE REPORT:",
-            errore
-        )
+        for indice, blocco in enumerate(
+            blocchi,
+            start=1
+        ):
+
+            print(
+                f"📤 Invio messaggio "
+                f"{indice}/{len(blocchi)} ...",
+                flush=True
+            )
+
+
+            bot.send_message(
+
+                message.chat.id,
+
+                blocco,
+
+                parse_mode="HTML"
+
+            )
+
+
+            print(
+                f"✅ Messaggio "
+                f"{indice}/{len(blocchi)} inviato.",
+                flush=True
+            )
+
 
         try:
 
-            bot.send_message(
+            bot.delete_message(
+
                 message.chat.id,
-                "❌ Si è verificato un errore "
-                "durante la creazione del report.\n\n"
-                "Riprova tra poco."
+
+                messaggio_attesa.message_id
+
             )
 
-        except Exception as errore2:
+        except Exception:
 
-            print(
-                "❌ Errore invio messaggio errore:",
-                errore2
+            pass
+
+
+        print(
+            "🏁 REPORT TELEGRAM "
+            "INVIATO COMPLETAMENTE.",
+            flush=True
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore creazione report: "
+            f"{e}",
+            flush=True
+        )
+
+
+        try:
+
+            bot.delete_message(
+
+                message.chat.id,
+
+                messaggio_attesa.message_id
+
             )
+
+        except Exception:
+
+            pass
+
+
+        bot.send_message(
+
+            message.chat.id,
+
+            "❌ Si è verificato un errore "
+            "durante il recupero dei pronostici.\n\n"
+
+            "Riprova tra qualche minuto."
+
+        )
 
 
 # ============================================================
-# SERVER HTTP RENDER
+# SERVER HTTP RENDER + WEBHOOK
 # ============================================================
 
-class RenderHandler(
+class HealthHandler(
     http.server.BaseHTTPRequestHandler
 ):
 
-    def log_message(self, format, *args):
-        # Evita log HTTP inutili.
-        return
 
-    def _invia_risposta(
-        self,
-        codice=200,
-        contenuto="OK"
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
+
+    def do_GET(
+        self
     ):
 
-        contenuto_bytes = contenuto.encode(
-            "utf-8"
+        print(
+            f"🌐 GET ricevuta: "
+            f"{self.path}",
+            flush=True
         )
 
-        self.send_response(codice)
+
+        if self.path == "/health":
+
+            risposta = (
+                "OK - Bot pronostici calcio online"
+            )
+
+        else:
+
+            risposta = (
+                "Bot pronostici calcio online!"
+            )
+
+
+        self.send_response(
+            200
+        )
+
 
         self.send_header(
             "Content-Type",
             "text/plain; charset=utf-8"
         )
 
+
         self.send_header(
             "Content-Length",
-            str(len(contenuto_bytes))
+            str(
+                len(
+                    risposta.encode(
+                        "utf-8"
+                    )
+                )
+            )
         )
+
 
         self.end_headers()
 
+
         self.wfile.write(
-            contenuto_bytes
+            risposta.encode(
+                "utf-8"
+            )
         )
 
-    def do_GET(self):
 
-        percorso = urlparse(
-            self.path
-        ).path
+    # --------------------------------------------------------
+    # POST WEBHOOK TELEGRAM
+    # --------------------------------------------------------
 
-        print()
+    def do_POST(
+        self
+    ):
+
         print(
-            "🌐 GET RICEVUTA:",
-            percorso
+            f"📩 POST RICEVUTA: "
+            f"{self.path}",
+            flush=True
         )
 
-        if percorso == "/":
-            self._invia_risposta(
-                200,
-                "Bot Pronostici Calcio ONLINE"
-            )
-            return
 
-        if percorso == "/health":
-            self._invia_risposta(
-                200,
-                "OK"
-            )
-            return
+        if self.path != WEBHOOK_PATH:
 
-        if percorso == "/telegram/webhook":
-            self._invia_risposta(
-                200,
-                "Webhook Telegram attivo"
-            )
-            return
-
-        self._invia_risposta(
-            404,
-            "Not Found"
-        )
-
-    def do_POST(self):
-
-        percorso = urlparse(
-            self.path
-        ).path
-
-        print()
-        print(
-            "📩 POST RICEVUTA:",
-            percorso
-        )
-
-        if percorso != "/telegram/webhook":
-
-            self._invia_risposta(
-                404,
-                "Not Found"
+            print(
+                f"❌ Percorso webhook "
+                f"non corretto: {self.path}",
+                flush=True
             )
 
+
+            self.send_response(
+                404
+            )
+
+            self.end_headers()
+
             return
+
 
         try:
 
-            lunghezza = int(
+            content_length = int(
+
                 self.headers.get(
                     "Content-Length",
                     "0"
                 )
+
             )
+
 
             print(
-                "📩 Dimensione richiesta:",
-                lunghezza,
-                "byte"
+                f"📩 Dimensione richiesta: "
+                f"{content_length} byte",
+                flush=True
             )
 
-            corpo = self.rfile.read(
-                lunghezza
+
+            body = self.rfile.read(
+                content_length
             )
 
-            update_json = json.loads(
-                corpo.decode("utf-8")
+
+            data = json.loads(
+                body.decode(
+                    "utf-8"
+                )
             )
+
+
+            update = (
+                telebot.types.Update
+                .de_json(data)
+            )
+
 
             print(
-                "✅ Update Telegram decodificato."
+                "✅ Update Telegram "
+                "decodificato.",
+                flush=True
             )
 
-            self._invia_risposta(
-                200,
-                "OK"
+
+            self.send_response(
+                200
             )
 
-            print(
-                "⚙️ Elaborazione update Telegram..."
+
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
             )
 
-            def elabora_update():
 
-                try:
+            self.end_headers()
 
-                    update = (
-                        telebot.types.Update.de_json(
-                            update_json
-                        )
-                    )
 
-                    bot.process_new_updates(
-                        [update]
-                    )
+            self.wfile.write(
+                b"OK"
+            )
 
-                    print(
-                        "✅ Update Telegram elaborato."
-                    )
-
-                except Exception as errore:
-
-                    print()
-                    print(
-                        "❌ ERRORE ELABORAZIONE UPDATE:",
-                        errore
-                    )
 
             thread = threading.Thread(
+
                 target=elabora_update,
+
+                args=(update,),
+
                 daemon=True
+
             )
+
 
             thread.start()
 
-            print(
-                "✅ Update inviato al thread "
-                "di elaborazione."
-            )
-
-        except json.JSONDecodeError:
 
             print(
-                "❌ JSON Telegram non valido."
+                "✅ Update inviato "
+                "al thread di elaborazione.",
+                flush=True
             )
 
-            self._invia_risposta(
-                400,
-                "Invalid JSON"
-            )
 
-        except Exception as errore:
+        except Exception as e:
 
             print(
-                "❌ ERRORE WEBHOOK:",
-                errore
+                f"❌ ERRORE WEBHOOK: {e}",
+                flush=True
             )
+
 
             try:
 
-                self._invia_risposta(
-                    500,
-                    "Internal Server Error"
+                self.send_response(
+                    200
+                )
+
+                self.end_headers()
+
+                self.wfile.write(
+                    b"ERROR"
                 )
 
             except Exception:
+
                 pass
 
 
+    # --------------------------------------------------------
+    # DISATTIVA LOG HTTP STANDARD
+    # --------------------------------------------------------
+
+    def log_message(
+        self,
+        format,
+        *args
+    ):
+
+        return
+
+
 # ============================================================
-# SERVER HTTP
+# ELABORA UPDATE TELEGRAM
 # ============================================================
 
-def avvia_server_http():
+def elabora_update(
+    update
+):
 
     try:
 
-        server = socketserver.ThreadingTCPServer(
-            ("0.0.0.0", RENDER_PORT),
-            RenderHandler
+        print(
+            "⚙️ Elaborazione update Telegram...",
+            flush=True
         )
 
-        server.allow_reuse_address = True
 
-        print()
-        print(
-            "=========================================="
-        )
-        print(
-            "🌐 SERVER HTTP RENDER"
-        )
-        print(
-            "=========================================="
+        bot.process_new_updates(
+            [update]
         )
 
+
         print(
-            f"🚀 Server HTTP avviato sulla porta "
-            f"{RENDER_PORT}"
+            "✅ Update Telegram elaborato.",
+            flush=True
         )
 
-        server.serve_forever()
 
-    except Exception as errore:
+    except Exception as e:
 
         print(
-            "❌ ERRORE SERVER HTTP:",
-            errore
+            f"❌ Errore elaborazione update: "
+            f"{e}",
+            flush=True
         )
 
 
 # ============================================================
-# CONFIGURAZIONE WEBHOOK TELEGRAM
+# AVVIA SERVER HTTP
+# ============================================================
+
+def avvia_server():
+
+    server = (
+        http.server.ThreadingHTTPServer(
+            (
+                "0.0.0.0",
+                PORT
+            ),
+            HealthHandler
+        )
+    )
+
+
+    print(
+        f"🌐 Server HTTP avviato "
+        f"sulla porta {PORT}",
+        flush=True
+    )
+
+
+    print(
+        f"🔗 Webhook Telegram: "
+        f"{WEBHOOK_URL}",
+        flush=True
+    )
+
+
+    server.serve_forever()
+
+
+# ============================================================
+# CONFIGURA WEBHOOK TELEGRAM
 # ============================================================
 
 def configura_webhook():
 
-    webhook_url = (
-        "https://bot-pronostici-gratis.onrender.com"
-        "/telegram/webhook"
+    print(
+        "==========================================",
+        flush=True
     )
 
-    print()
     print(
-        "=========================================="
+        "📡 CONFIGURAZIONE WEBHOOK TELEGRAM",
+        flush=True
     )
+
     print(
-        "🔎 VERIFICA BOT TELEGRAM"
+        "==========================================",
+        flush=True
     )
-    print(
-        "=========================================="
-    )
+
 
     try:
 
-        info = bot.get_me()
+        print(
+            "🔎 Verifica bot Telegram...",
+            flush=True
+        )
+
+
+        me = bot.get_me()
+
 
         print(
-            "🤖 BOT TELEGRAM:",
-            f"@{info.username}"
+            f"🤖 BOT TELEGRAM: "
+            f"@{me.username}",
+            flush=True
         )
+
 
         print(
-            "🆔 BOT ID:",
-            info.id
+            f"🆔 BOT ID: "
+            f"{me.id}",
+            flush=True
         )
 
-    except Exception as errore:
 
         print(
-            "❌ Impossibile verificare Telegram:",
-            errore
+            "🔗 Impostazione webhook:",
+            flush=True
         )
 
-        return False
 
-    print()
-    print(
-        "🔗 Impostazione webhook:"
-    )
-
-    print(
-        webhook_url
-    )
-
-    try:
-
-        # Elimina eventuale webhook precedente.
-        bot.delete_webhook(
-            drop_pending_updates=False
+        print(
+            WEBHOOK_URL,
+            flush=True
         )
 
-        time.sleep(1)
 
         risultato = bot.set_webhook(
-            url=webhook_url,
-            allowed_updates=["message"]
+
+            url=WEBHOOK_URL,
+
+            allowed_updates=[
+                "message"
+            ],
+
+            drop_pending_updates=True
+
         )
+
 
         print(
-            "✅ Webhook impostato:",
-            risultato
+            f"✅ Webhook impostato: "
+            f"{risultato}",
+            flush=True
         )
 
-        time.sleep(1)
 
-        info_webhook = bot.get_webhook_info()
+        info = bot.get_webhook_info()
 
-        print()
-        print(
-            "========== STATO WEBHOOK =========="
-        )
 
         print(
-            "URL:",
-            info_webhook.url
+            "========== STATO WEBHOOK ==========",
+            flush=True
         )
+
 
         print(
-            "Pending updates:",
-            info_webhook.pending_update_count
+            f"URL: {info.url}",
+            flush=True
         )
+
 
         print(
-            "Ultimo errore:",
-            info_webhook.last_error_message
+            f"Pending updates: "
+            f"{info.pending_update_count}",
+            flush=True
         )
+
 
         print(
-            "Data ultimo errore:",
-            info_webhook.last_error_date
+            f"Ultimo errore: "
+            f"{info.last_error_message}",
+            flush=True
         )
+
 
         print(
-            "IP Telegram:",
-            info_webhook.ip_address
+            f"Data ultimo errore: "
+            f"{info.last_error_date}",
+            flush=True
         )
+
 
         print(
-            "Max connessioni:",
-            info_webhook.max_connections
+            f"IP Telegram: "
+            f"{info.ip_address}",
+            flush=True
         )
+
 
         print(
-            "Allowed updates:",
-            info_webhook.allowed_updates
+            f"Max connessioni: "
+            f"{info.max_connections}",
+            flush=True
         )
+
 
         print(
-            "===================================="
+            f"Allowed updates: "
+            f"{info.allowed_updates}",
+            flush=True
         )
 
-        if info_webhook.url == webhook_url:
 
-            print()
+        print(
+            "====================================",
+            flush=True
+        )
+
+
+        if info.url == WEBHOOK_URL:
+
             print(
-                "✅ WEBHOOK TELEGRAM CONFIGURATO "
-                "CORRETTAMENTE."
+                "✅ WEBHOOK TELEGRAM "
+                "CONFIGURATO CORRETTAMENTE.",
+                flush=True
             )
 
             return True
 
-        print()
+
         print(
-            "❌ URL WEBHOOK NON CORRISPONDENTE."
+            "⚠️ Il webhook restituito "
+            "da Telegram non coincide "
+            "con quello previsto.",
+            flush=True
         )
+
 
         return False
 
-    except Exception as errore:
 
-        print()
+    except Exception as e:
+
         print(
-            "❌ ERRORE CONFIGURAZIONE WEBHOOK:",
-            errore
+            f"❌ ERRORE CONFIGURAZIONE "
+            f"WEBHOOK: {e}",
+            flush=True
         )
+
 
         return False
 
 
 # ============================================================
-# AVVIO APPLICAZIONE
+# AVVIO PRINCIPALE
 # ============================================================
 
-def main():
-
-    print()
-    print(
-        "=========================================="
-    )
-    print(
-        "⚽ BOT PRONOSTICI CALCIO"
-    )
-    print(
-        "=========================================="
-    )
+if __name__ == "__main__":
 
     print(
-        "Avvio applicazione Render..."
+        "==========================================",
+        flush=True
     )
 
+
     print(
-        "=========================================="
+        "⚽ BOT PRONOSTICI CALCIO",
+        flush=True
     )
+
+
+    print(
+        "Avvio applicazione Render...",
+        flush=True
+    )
+
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
 
     # --------------------------------------------------------
     # SERVER HTTP
     # --------------------------------------------------------
 
     thread_server = threading.Thread(
-        target=avvia_server_http,
+
+        target=avvia_server,
+
         daemon=True
+
     )
+
 
     thread_server.start()
 
+
     print(
-        "Server Render attivo."
+        "Server Render attivo.",
+        flush=True
     )
 
-    time.sleep(2)
 
     # --------------------------------------------------------
-    # TELEGRAM
+    # TEST API-FOOTBALL
     # --------------------------------------------------------
 
-    print()
-    print(
-        "=========================================="
-    )
+    test_api()
 
-    print(
-        "CONFIGURAZIONE TELEGRAM"
-    )
 
-    print(
-        "=========================================="
-    )
+    # --------------------------------------------------------
+    # WEBHOOK TELEGRAM
+    # --------------------------------------------------------
 
-    configurato = configura_webhook()
+    webhook_ok = configura_webhook()
 
-    if configurato:
+
+    if webhook_ok:
 
         print(
-            "🟢 Telegram configurato correttamente."
+            "🟢 Telegram configurato correttamente.",
+            flush=True
         )
 
     else:
 
         print(
-            "🔴 Telegram NON configurato correttamente."
+            "🔴 ATTENZIONE: webhook Telegram "
+            "NON configurato.",
+            flush=True
         )
 
-    # --------------------------------------------------------
-    # BOT ONLINE
-    # --------------------------------------------------------
-
-    print()
-    print(
-        "=========================================="
-    )
 
     print(
-        "🚀 BOT ONLINE!"
+        "==========================================",
+        flush=True
     )
+
 
     print(
-        "=========================================="
+        "🚀 BOT ONLINE!",
+        flush=True
     )
 
+
+    print(
+        f"🌐 Render: {RENDER_EXTERNAL_URL}",
+        flush=True
+    )
+
+
+    print(
+        f"📡 Webhook: {WEBHOOK_URL}",
+        flush=True
+    )
+
+
+    print(
+        "==========================================",
+        flush=True
+    )
+
+
     # --------------------------------------------------------
-    # MANTIENI PROCESSO ATTIVO
+    # MANTIENE VIVO IL PROCESSO
     # --------------------------------------------------------
 
-    while True:
+    try:
 
-        time.sleep(60)
+        while True:
+
+            threading.Event().wait(
+                3600
+            )
 
 
-# ============================================================
-# START
-# ============================================================
+    except KeyboardInterrupt:
 
-if __name__ == "__main__":
-    main()
+        print(
+            "🛑 Arresto bot...",
+            flush=True
+        )
