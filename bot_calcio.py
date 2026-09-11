@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import time
@@ -373,4 +372,3 @@ def api_football_get(
     print(
         "=========================================="
     )
-```
