@@ -389,20 +389,6 @@ def espn_get(
         use_cache=use_cache
     )
 
-
-def espn_get_standings(
-    league: str,
-    cache_key: Optional[str] = None
-):
-    url = f"{ESPN_STANDINGS_BASE}/{league}/standings"
-
-    return espn_get_url(
-        url,
-        params={},
-        cache_key=cache_key or f"standings_{league}"
-    )
-
-
 # ============================================================
 # ESTRAZIONE RICORSIVA
 # ============================================================
