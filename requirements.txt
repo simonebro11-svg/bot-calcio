@@ -1,2 +1,2 @@
-pyTelegramBotAPI
+pyTelegramBotAPI>=4.22,<5 e requests>=2.28,<3
 requests
