@@ -3,8 +3,11 @@ import re
 import json
 import time
 import math
+import signal
+import queue
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +31,13 @@ RENDER_EXTERNAL_URL = os.getenv(
 WEBHOOK_PATH = "/telegram/webhook"
 WEBHOOK_URL = RENDER_EXTERNAL_URL + WEBHOOK_PATH
 
+# Token segreto per autenticare le richieste webhook di Telegram.
+# Se non fornito viene generato al pronto e passato a set_webhook.
+TELEGRAM_SECRET_TOKEN = (
+    os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
+    or os.urandom(16).hex()
+)
+
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
     ""
@@ -37,6 +47,8 @@ HTTP_TIMEOUT = 15
 
 # Cache ESPN
 CACHE_TTL = 30 * 60
+CACHE_TTL_NEGATIVE = 6 * 60
+CACHE_MAX_KEYS = 500
 
 # Giorni futuri da analizzare
 GIORNI_FUTURI = 14
@@ -50,8 +62,18 @@ NUM_FORM = 10
 # Giorni da analizzare per la forma
 GIORNI_FORM = 90
 
-# Giorni da analizzare per il riposo
-GIORNI_RIPOSO = 30
+# Massimo giorni di scansione nel fallback H2H giornaliero
+# (usato solo se l'endpoint team-schedule non risponde)
+H2H_FALLBACK_GIORNI = 120
+
+# Fattore sicurezza: le partite devono essere terminate da almeno
+# 4 ore per essere considerate completate (evita match in corso).
+TERMINAZIONE_MIN_ORE = 4
+
+# Concorrenza analisi massime simultanee
+ANALISI_MAX_SIMULTANEE = 2
+
+MODALITA = "avvio"
 
 
 # ============================================================
@@ -64,7 +86,7 @@ if not TELEGRAM_BOT_TOKEN:
     )
 
 print("TELEGRAM_BOT_TOKEN: OK")
-print("⚽ Dati calcistici: ESPN")
+print("⚽ Dati calcistici: ESPN (endpoint team-schedule ottimizzati)")
 
 
 # ============================================================
@@ -75,6 +97,9 @@ bot = telebot.TeleBot(
     TELEGRAM_BOT_TOKEN,
     parse_mode="HTML"
 )
+
+# Coda aggiornamenti + singolo worker (thread-safe, sequenziale)
+_UPDATE_QUEUE: "queue.Queue[bytes]" = queue.Queue()
 
 
 # ============================================================
@@ -116,17 +141,22 @@ COMPETIZIONI_EUROPEE = {
     "uefa.europa.conf": "Conference League"
 }
 
+# Slug senza valore statistico (non contano per forma/H2H)
+SLUG_INUTILI = {"club.friendly"}
+
 
 # ============================================================
-# CACHE
+# CACHE (LRU con TTL, supporto risultati negativi)
 # ============================================================
 
-_CACHE: Dict[str, Tuple[float, Any]] = {}
+_CACHE: Dict[str, Tuple[float, Any, int]] = {}
 
 _CACHE_LOCK = threading.Lock()
 
 
-def cache_get(key: str):
+def cache_get(
+    key: str
+):
     with _CACHE_LOCK:
 
         item = _CACHE.get(key)
@@ -134,23 +164,38 @@ def cache_get(key: str):
         if not item:
             return None
 
-        timestamp, value = item
+        timestamp, value, ttl = item
 
-        if time.time() - timestamp > CACHE_TTL:
+        if time.time() - timestamp > ttl:
             del _CACHE[key]
             return None
+
+        # porta in coda (LRU)
+        _CACHE.pop(key)
+        _CACHE[key] = item
 
         return value
 
 
 def cache_set(
     key: str,
-    value: Any
+    value: Any,
+    ttl: int = CACHE_TTL
 ):
     with _CACHE_LOCK:
+
+        if len(_CACHE) >= CACHE_MAX_KEYS:
+            for _ in range(CACHE_MAX_KEYS // 4):
+                try:
+                    vecchio = next(iter(_CACHE))
+                    del _CACHE[vecchio]
+                except StopIteration:
+                    break
+
         _CACHE[key] = (
             time.time(),
-            value
+            value,
+            ttl
         )
 
 
@@ -278,6 +323,18 @@ def data_italiana(
     )
 
 
+def html_safe(
+    testo: str
+) -> str:
+
+    return (
+        str(testo or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def parse_datetime(
     value: str
 ) -> Optional[datetime]:
@@ -302,51 +359,6 @@ def parse_datetime(
             )
 
         return dt
-
-    except Exception:
-        return None
-
-
-def evento_terminato(
-    evento: Dict[str, Any]
-) -> bool:
-
-    status = (
-        evento.get("status", {})
-        .get("type", {})
-    )
-
-    return bool(
-        status.get("completed")
-        or status.get("state") == "post"
-        or status.get("name") in {
-            "STATUS_FINAL",
-            "STATUS_FULL_TIME"
-        }
-    )
-
-
-def estrai_score(
-    competitor: Dict[str, Any]
-) -> Optional[int]:
-
-    score = competitor.get(
-        "score"
-    )
-
-    if score is None:
-        return None
-
-    if isinstance(score, dict):
-
-        score = (
-            score.get("displayValue")
-            or score.get("value")
-            or score.get("alternateDisplayValue")
-        )
-
-    try:
-        return int(float(score))
 
     except Exception:
         return None
@@ -392,6 +404,35 @@ def estrai_competitors(
     return home, away
 
 
+def estrai_score(
+    competitor: Dict[str, Any]
+) -> Optional[int]:
+
+    score = competitor.get(
+        "score"
+    )
+
+    if score is None:
+        return None
+
+    if isinstance(score, dict):
+
+        score = (
+            score.get("displayValue")
+            or score.get("value")
+            or score.get("alternateDisplayValue")
+        )
+
+    if score is None:
+        return None
+
+    try:
+        return int(float(score))
+
+    except Exception:
+        return None
+
+
 def estrai_nome_team(
     competitor: Dict[str, Any]
 ) -> str:
@@ -426,8 +467,109 @@ def estrai_id_team(
     return str(value)
 
 
+def slug_competizione(
+    evento: Dict[str, Any]
+) -> str:
+
+    league_obj = evento.get(
+        "league",
+        {}
+    )
+
+    if not isinstance(league_obj, dict):
+        return ""
+
+    return str(
+        league_obj.get("slug") or ""
+    )
+
+
+def evento_terminato(
+    evento: Dict[str, Any],
+    oggi: Optional[datetime] = None
+) -> bool:
+
+    if oggi is None:
+        oggi = datetime.now(timezone.utc)
+
+    # 1) Eventi scoreboard: campo status esplicito
+    status = (
+        evento.get("status", {})
+        .get("type", {})
+    )
+
+    if isinstance(status, dict) and status:
+        return bool(
+            status.get("completed")
+            or status.get("state") == "post"
+            or status.get("name") in {
+                "STATUS_FINAL",
+                "STATUS_FULL_TIME"
+            }
+        )
+
+    # 2) Eventi team-schedule: nessun campo status ->
+    #    score presenti + data nel passato da almeno
+    #    TERMINAZIONE_MIN_ORE ore (evita match in corso)
+    dt = parse_datetime(
+        evento.get("date", "")
+    )
+
+    if not dt:
+        return False
+
+    if dt >= oggi:
+        return False
+
+    if (
+        oggi - dt
+    ) < timedelta(
+        hours=TERMINAZIONE_MIN_ORE
+    ):
+        return False
+
+    home, away = (
+        estrai_competitors(
+            evento
+        )
+    )
+
+    if not home or not away:
+        return False
+
+    return (
+        estrai_score(home) is not None
+        and estrai_score(away) is not None
+    )
+
+
+def anni_stagione(
+    oggi: Optional[datetime] = None
+) -> List[int]:
+
+    """Anni 'ESPN' della stagione corrente e precedente.
+
+    L'anno stagione ESPN è l'anno d'inizio del campionato
+    (es. 2026-27 -> 2026).
+    """
+
+    if oggi is None:
+        oggi = datetime.now(timezone.utc)
+
+    corrente = (
+        oggi.year
+        if oggi.month >= 7
+        else oggi.year - 1
+    )
+
+    return [
+        corrente,
+        corrente - 1
+    ]
+
+
 # ============================================================
-# HTTP ESPN
+# HTTP ESPN (con retry)
 # ============================================================
 
 def espn_get_url(
@@ -446,61 +588,77 @@ def espn_get_url(
         if cached is not None:
             return cached
 
-    try:
+    for attempt in (1, 2):
 
-        response = requests.get(
-            url,
-            params=params or {},
-            timeout=HTTP_TIMEOUT
-        )
+        try:
 
-        if response.status_code != 200:
+            response = requests.get(
+                url,
+                params=params or {},
+                timeout=HTTP_TIMEOUT
+            )
+
+            if response.status_code == 200:
+
+                data = response.json()
+
+                if cache_key and use_cache:
+                    cache_set(
+                        cache_key,
+                        data
+                    )
+
+                return data
+
+            if (
+                response.status_code in {
+                    429, 500, 502, 503, 504
+                }
+                and attempt == 1
+            ):
+                time.sleep(1.0)
+                continue
 
             print(
                 f"⚠️ ESPN HTTP "
                 f"{response.status_code}: "
-                f"{response.url}"
+                f"{url}"
             )
 
             return None
 
-        data = response.json()
+        except requests.RequestException as exc:
 
-        if cache_key and use_cache:
+            if attempt == 1:
+                time.sleep(1.0)
+                continue
 
-            cache_set(
-                cache_key,
-                data
+            print(
+                f"❌ Errore richiesta ESPN: "
+                f"{exc}"
             )
 
-        return data
+            return None
 
-    except requests.RequestException as exc:
+        except ValueError as exc:
 
-        print(
-            f"❌ Errore richiesta ESPN: "
-            f"{exc}"
-        )
+            print(
+                f"❌ JSON ESPN non valido: "
+                f"{exc}"
+            )
 
-        return None
+            return None
 
-    except ValueError as exc:
+        except Exception as exc:
 
-        print(
-            f"❌ JSON ESPN non valido: "
-            f"{exc}"
-        )
+            print(
+                f"❌ Errore ESPN generico: "
+                f"{exc}"
+            )
 
-        return None
+            return None
 
-    except Exception as exc:
-
-        print(
-            f"❌ Errore ESPN generico: "
-            f"{exc}"
-        )
-
-        return None
+    return None
 
 
 def espn_get(
@@ -521,6 +679,152 @@ def espn_get(
         cache_key=cache_key,
         use_cache=use_cache
     )
+
+
+# ============================================================
+# STORIA SQUADRA (endpoint ottimizzato)
+#
+# all/teams/{id}/schedule?season=YYYY restituisce TUTTE le
+# competizioni della stagione (campionato, coppe, UEFA,
+# amichevole) con 1 sola chiamata. Richiedendo stagione
+# corrente e precedente copriamo:
+#   • forma recente (90 giorni)
+#   • H2H (tutte le competizioni)
+#   • impegni europei
+#   • riposo / fatica
+# ============================================================
+
+def _storia_stagione(
+    team_id: str,
+    season: int
+) -> List[Dict[str, Any]]:
+
+    cache_key = (
+        f"storia_raw_{team_id}_"
+        f"{season}"
+    )
+
+    cached = cache_get(
+        cache_key
+    )
+
+    if cached is not None:
+        return cached
+
+    data = espn_get(
+        f"all/teams/{team_id}/schedule",
+        params={
+            "season": season
+        },
+        cache_key=cache_key
+    )
+
+    if not data:
+        return []
+
+    eventi = data.get(
+        "events"
+    )
+
+    if not isinstance(eventi, list):
+        return []
+
+    return eventi
+
+
+def storia_squadra(
+    team_id: Optional[str],
+    oggi: Optional[datetime] = None
+) -> Optional[List[Dict[str, Any]]]:
+
+    """Storia completa (2 stagioni, tutte competizioni)
+    di una squadra, ordinata dalla più recente.
+
+    None = team id assente o endpoint non disponibile.
+    """
+
+    if not team_id:
+        return None
+
+    if oggi is None:
+        oggi = datetime.now(timezone.utc)
+
+    cache_key = (
+        f"storia_team_{team_id}"
+    )
+
+    cached = cache_get(
+        cache_key
+    )
+
+    if cached is not None:
+        return cached
+
+    print(
+        f"📜 Storia squadra: "
+        f"team {team_id} "
+        f"(stagioni {anni_stagione(oggi)})"
+    )
+
+    visti = set()
+    eventi = []
+
+    for season in anni_stagione(
+        oggi
+    ):
+
+        for evento in (
+            _storia_stagione(
+                team_id,
+                season
+            )
+        ):
+
+            event_id = str(
+                evento.get(
+                    "id",
+                    ""
+                )
+            ).strip()
+
+            if not event_id:
+                continue
+
+            if event_id in visti:
+                continue
+
+            visti.add(event_id)
+            eventi.append(evento)
+
+    def _chiave_data(evento):
+
+        dt = parse_datetime(
+            evento.get(
+                "date",
+                ""
+            )
+        )
+
+        return dt or datetime.min.replace(
+            tzinfo=timezone.utc
+        )
+
+    eventi.sort(
+        key=_chiave_data,
+        reverse=True
+    )
+
+    print(
+        f"   📜 {len(eventi)} eventi "
+        f"totali per team {team_id}"
+    )
+
+    cache_set(
+        cache_key,
+        eventi
+    )
+
+    return eventi
 
 
 # ============================================================
@@ -557,38 +861,25 @@ def recupera_partite_future(
         timezone.utc
     )
 
-    eventi = []
-    ids_visti = set()
+    date = [
+        (
+            oggi
+            + timedelta(days=i)
+        ).strftime("%Y%m%d")
+        for i in range(GIORNI_FUTURI)
+    ]
 
     print(
         f"🔎 Ricerca ESPN da "
         f"{oggi.strftime('%Y-%m-%d %H:%M UTC')} "
         f"per i prossimi "
-        f"{GIORNI_FUTURI} giorni"
+        f"{GIORNI_FUTURI} giorni "
+        f"({len(date)} richieste parallele)"
     )
 
-    for giorno_offset in range(
-        GIORNI_FUTURI
-    ):
+    def _fetch(data_str: str):
 
-        giorno = (
-            oggi
-            + timedelta(
-                days=giorno_offset
-            )
-        )
-
-        data_str = giorno.strftime(
-            "%Y%m%d"
-        )
-
-        print(
-            f"   📅 ESPN "
-            f"{campionato} - "
-            f"data {data_str}"
-        )
-
-        data = espn_get(
+        return espn_get(
             f"{campionato}/scoreboard",
             params={
                 "dates": data_str
@@ -600,26 +891,28 @@ def recupera_partite_future(
             )
         )
 
-        if not data:
+    with ThreadPoolExecutor(
+        max_workers=4
+    ) as executor:
 
-            print(
-                f"   ⚠️ Nessuna risposta "
-                f"ESPN per {data_str}"
+        risposte = list(
+            executor.map(
+                _fetch,
+                date
             )
+        )
 
+    eventi = []
+    ids_visti = set()
+
+    for data in risposte:
+
+        if not data:
             continue
 
-        eventi_giorno = data.get(
-            "events",
-            []
-        )
-
-        print(
-            f"   📊 Eventi ESPN trovati: "
-            f"{len(eventi_giorno)}"
-        )
-
-        for evento in eventi_giorno:
+        for evento in (
+            data.get("events", [])
+        ):
 
             event_id = str(
                 evento.get(
@@ -651,16 +944,9 @@ def recupera_partite_future(
                 continue
 
             if dt.tzinfo is None:
-
-                dt = dt.replace(
-                    tzinfo=timezone.utc
-                )
-
+                dt = dt.replace(tzinfo=timezone.utc)
             else:
-
-                dt = dt.astimezone(
-                    timezone.utc
-                )
+                dt = dt.astimezone(timezone.utc)
 
             if dt <= oggi:
                 continue
@@ -680,24 +966,11 @@ def recupera_partite_future(
 
                 continue
 
-            ids_visti.add(
-                event_id
-            )
+            ids_visti.add(event_id)
 
             evento["_datetime"] = dt
 
-            eventi.append(
-                evento
-            )
-
-            print(
-                f"   ✅ "
-                f"{estrai_nome_team(home)} "
-                f"- "
-                f"{estrai_nome_team(away)} "
-                f"| "
-                f"{dt.strftime('%d/%m/%Y %H:%M UTC')}"
-            )
+            eventi.append(evento)
 
     eventi.sort(
         key=lambda x:
@@ -728,25 +1001,77 @@ def recupera_partite_future(
 # FORM RECENTE
 # ============================================================
 
-def recupera_form_da_eventi(
+def _match_da_evento(
+    evento: Dict[str, Any],
+    team_name: str
+) -> Optional[Dict[str, Any]]:
+
+    home, away = (
+        estrai_competitors(
+            evento
+        )
+    )
+
+    if not home or not away:
+        return None
+
+    score_home = estrai_score(
+        home
+    )
+
+    score_away = estrai_score(
+        away
+    )
+
+    if (
+        score_home is None
+        or score_away is None
+    ):
+        return None
+
+    dt = parse_datetime(
+        evento.get(
+            "date",
+            ""
+        )
+    )
+
+    if not dt:
+        return None
+
+    return {
+        "id": str(
+            evento.get("id", "")
+        ),
+        "date": dt,
+        "home": estrai_nome_team(
+            home
+        ),
+        "away": estrai_nome_team(
+            away
+        ),
+        "home_score": score_home,
+        "away_score": score_away,
+        "team": team_name
+    }
+
+
+def _form_da_scoreboard(
     team_name: str,
     league: str
 ) -> List[Dict[str, Any]]:
 
-    cache_key = (
-        f"form_{league}_"
-        f"{normalizza_nome(team_name)}"
-    )
-
-    cached = cache_get(
-        cache_key
-    )
-
-    if cached is not None:
-        return cached
+    """Fallback lento: scandisce lo scoreboard
+    giornaliero (con stop anticipato quando si
+    raggiungono NUM_FORM partite).
+    """
 
     oggi = datetime.now(
         timezone.utc
+    )
+
+    nome_norm = normalizza_nome(
+        team_name
     )
 
     partite = []
@@ -758,9 +1083,7 @@ def recupera_form_da_eventi(
 
         giorno = (
             oggi
-            - timedelta(
-                days=offset
-            )
+            - timedelta(days=offset)
         )
 
         data_str = giorno.strftime(
@@ -788,7 +1111,8 @@ def recupera_form_da_eventi(
         ):
 
             if not evento_terminato(
-                evento
+                evento,
+                oggi
             ):
                 continue
 
@@ -822,10 +1146,6 @@ def recupera_form_da_eventi(
                 away
             )
 
-            nome_norm = normalizza_nome(
-                team_name
-            )
-
             if (
                 normalizza_nome(
                     nome_home
@@ -837,18 +1157,77 @@ def recupera_form_da_eventi(
             ):
                 continue
 
-            score_home = estrai_score(
-                home
+            match = _match_da_evento(
+                evento,
+                team_name
             )
 
-            score_away = estrai_score(
-                away
+            if not match:
+                continue
+
+            ids_visti.add(
+                event_id
             )
 
-            if (
-                score_home is None
-                or score_away is None
-            ):
+            partite.append(
+                match
+            )
+
+        if len(partite) >= NUM_FORM:
+            break
+
+    return partite
+
+
+def recupera_form_da_eventi(
+    team_name: str,
+    league: str,
+    team_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+
+    cache_key = (
+        f"form_{league}_"
+        f"{normalizza_nome(team_name)}"
+    )
+
+    cached = cache_get(
+        cache_key
+    )
+
+    if cached is not None:
+        return cached
+
+    oggi = datetime.now(
+        timezone.utc
+    )
+
+    limite = oggi - timedelta(
+        days=GIORNI_FORM
+    )
+
+    partite: List[Dict[str, Any]] = []
+
+    storia = (
+        storia_squadra(
+            team_id,
+            oggi
+        )
+        if team_id
+        else None
+    )
+
+    # Storia non disponibile (endpoint guasto o id
+    # assente) -> fallback lento sullo scoreboard
+    if not storia:
+        storia = None
+
+    if storia is not None:
+
+        for evento in storia:
+
+            if slug_competizione(
+                evento
+            ) in SLUG_INUTILI:
                 continue
 
             dt = parse_datetime(
@@ -858,22 +1237,29 @@ def recupera_form_da_eventi(
                 )
             )
 
-            if not dt:
+            if not dt or dt < limite:
                 continue
 
-            ids_visti.add(
-                event_id
+            if not evento_terminato(
+                evento,
+                oggi
+            ):
+                continue
+
+            match = _match_da_evento(
+                evento,
+                team_name
             )
 
-            partite.append({
-                "id": event_id,
-                "date": dt,
-                "home": nome_home,
-                "away": nome_away,
-                "home_score": score_home,
-                "away_score": score_away,
-                "team": team_name
-            })
+            if match:
+                partite.append(match)
+
+    else:
+
+        partite = _form_da_scoreboard(
+            team_name,
+            league
+        )
 
     partite.sort(
         key=lambda x: x["date"],
@@ -946,6 +1332,10 @@ def statistiche_form(
     gol_fatti = 0
     gol_subiti = 0
 
+    team_norm = normalizza_nome(
+        team_name
+    )
+
     for match in form:
 
         risultato = risultato_team(
@@ -953,19 +1343,18 @@ def statistiche_form(
             team_name
         )
 
-        risultati.append(
-            risultato
-        )
+        if risultato == "?":
+            continue
 
         home = normalizza_nome(
             match["home"]
         )
 
-        team = normalizza_nome(
-            team_name
+        risultati.append(
+            risultato
         )
 
-        if home == team:
+        if home == team_norm:
 
             gf = match["home_score"]
             gs = match["away_score"]
@@ -1109,57 +1498,133 @@ def rendimento_trasferta(
 
 
 # ============================================================
-# CALENDARIO COMPLETO SQUADRA
-# ============================================================
-
-def recupera_calendario_completo_squadra(
-    team_id: Optional[str]
-) -> Optional[List[Dict[str, Any]]]:
-
-    if not team_id:
-        return None
-
-    cache_key = (
-        f"team_all_schedule_{team_id}"
-    )
-
-    cached = cache_get(
-        cache_key
-    )
-
-    if cached is not None:
-        return cached
-
-    url = (
-        f"{ESPN_BASE}/all/teams/"
-        f"{team_id}/schedule"
-    )
-
-    data = espn_get_url(
-        url,
-        params={},
-        cache_key=cache_key
-    )
-
-    if not data:
-        return None
-
-    eventi = data.get(
-        "events"
-    )
-
-    if not isinstance(
-        eventi,
-        list
-    ):
-        return None
-
-    return eventi
-
-
-# ============================================================
 # H2H
 # ============================================================
+
+def _h2h_da_storia(
+    storia: Optional[List[Dict[str, Any]]],
+    home_name: str,
+    away_name: str,
+    home_team_id: Optional[str],
+    away_team_id: Optional[str],
+    oggi: datetime
+) -> List[Dict[str, Any]]:
+
+    if not storia:
+        return []
+
+    home_norm = normalizza_nome(
+        home_name
+    )
+
+    away_norm = normalizza_nome(
+        away_name
+    )
+
+    risultati = []
+
+    for evento in storia:
+
+        if slug_competizione(
+            evento
+        ) in SLUG_INUTILI:
+            continue
+
+        if not evento_terminato(
+            evento,
+            oggi
+        ):
+            continue
+
+        home, away = (
+            estrai_competitors(
+                evento
+            )
+        )
+
+        if not home or not away:
+            continue
+
+        if home_team_id and away_team_id:
+
+            id_home = estrai_id_team(
+                home
+            )
+
+            id_away = estrai_id_team(
+                away
+            )
+
+            if (
+                id_home and id_away
+                and {
+                    id_home,
+                    id_away
+                }
+                != {
+                    home_team_id,
+                    away_team_id
+                }
+            ):
+                continue
+
+        else:
+
+            eh = estrai_nome_team(
+                home
+            )
+
+            ea = estrai_nome_team(
+                away
+            )
+
+            if (
+                normalizza_nome(eh) != home_norm
+                and normalizza_nome(eh) != away_norm
+            ) or (
+                normalizza_nome(ea) != home_norm
+                and normalizza_nome(ea) != away_norm
+            ):
+                continue
+
+        hs = estrai_score(
+            home
+        )
+
+        ascore = estrai_score(
+            away
+        )
+
+        if (
+            hs is None
+            or ascore is None
+        ):
+            continue
+
+        dt = parse_datetime(
+            evento.get(
+                "date",
+                ""
+            )
+        )
+
+        if not dt:
+            continue
+
+        risultati.append({
+            "date": dt,
+            "home": estrai_nome_team(
+                home
+            ),
+            "away": estrai_nome_team(
+                away
+            ),
+            "home_score": hs,
+            "away_score": ascore
+        })
+
+    return risultati
+
 
 def recupera_h2h(
     home_name: str,
@@ -1182,15 +1647,65 @@ def recupera_h2h(
     if cached is not None:
         return cached
 
-    risultati = []
+    oggi = datetime.now(
+        timezone.utc
+    )
 
-    calendario = (
-        recupera_calendario_completo_squadra(
-            home_team_id
+    storia_home = (
+        storia_squadra(
+            home_team_id,
+            oggi
+        )
+        if home_team_id
+        else None
+    )
+
+    storia_away = (
+        storia_squadra(
+            away_team_id,
+            oggi
+        )
+        if away_team_id
+        else None
+    )
+
+    risultati = (
+        _h2h_da_storia(
+            storia_home,
+            home_name,
+            away_name,
+            home_team_id,
+            away_team_id,
+            oggi
         )
     )
 
-    if calendario:
+    if not risultati and away_team_id:
+
+        risultati = (
+            _h2h_da_storia(
+                storia_away,
+                home_name,
+                away_name,
+                home_team_id,
+                away_team_id,
+                oggi
+            )
+        )
+
+    # FALLBACK lento: scoreboard giornaliero.
+    # Necessario solo se la storia di una delle due
+    # squadre NON è disponibile: se entrambe le storie
+    # (2 stagioni, tutte le competizioni) sono state
+    # recuperate, un confronto inesistente in quel
+    # arco non può esistere nemmeno nello scoreboard.
+    storia_ok = bool(
+        storia_home
+    ) and bool(
+        storia_away
+    )
+
+    if not risultati and league and not storia_ok:
 
         home_norm = normalizza_nome(
             home_name
@@ -1200,89 +1715,19 @@ def recupera_h2h(
             away_name
         )
 
-        for evento in calendario:
-
-            if not evento_terminato(
-                evento
-            ):
-                continue
-
-            home, away = (
-                estrai_competitors(
-                    evento
-                )
-            )
-
-            if not home or not away:
-                continue
-
-            eh = estrai_nome_team(
-                home
-            )
-
-            ea = estrai_nome_team(
-                away
-            )
-
-            coppia = {
-                normalizza_nome(eh),
-                normalizza_nome(ea)
-            }
-
-            richiesta = {
-                home_norm,
-                away_norm
-            }
-
-            if coppia != richiesta:
-                continue
-
-            hs = estrai_score(
-                home
-            )
-
-            ascore = estrai_score(
-                away
-            )
-
-            if (
-                hs is None
-                or ascore is None
-            ):
-                continue
-
-            dt = parse_datetime(
-                evento.get(
-                    "date",
-                    ""
-                )
-            )
-
-            if not dt:
-                continue
-
-            risultati.append({
-                "date": dt,
-                "home": eh,
-                "away": ea,
-                "home_score": hs,
-                "away_score": ascore
-            })
-
-    # FALLBACK
-    if not risultati and league:
-
-        oggi = datetime.now(
-            timezone.utc
+        print(
+            f"🔎 H2H fallback scoreboard: "
+            f"{home_name} vs {away_name} "
+            f"(max {H2H_FALLBACK_GIORNI} giorni)"
         )
 
-        for offset in range(365):
+        for offset in range(
+            H2H_FALLBACK_GIORNI
+        ):
 
             giorno = (
                 oggi
-                - timedelta(
-                    days=offset
-                )
+                - timedelta(days=offset)
             )
 
             data_str = giorno.strftime(
@@ -1310,7 +1755,8 @@ def recupera_h2h(
             ):
 
                 if not evento_terminato(
-                    evento
+                    evento,
+                    oggi
                 ):
                     continue
 
@@ -1334,19 +1780,13 @@ def recupera_h2h(
                     ea_comp
                 )
 
-                coppia = {
-                    normalizza_nome(eh),
-                    normalizza_nome(ea)
-                }
-
-                if coppia != {
-                    normalizza_nome(
-                        home_name
-                    ),
-                    normalizza_nome(
-                        away_name
-                    )
-                }:
+                if (
+                    normalizza_nome(eh) != home_norm
+                    and normalizza_nome(eh) != away_norm
+                ) or (
+                    normalizza_nome(ea) != home_norm
+                    and normalizza_nome(ea) != away_norm
+                ):
                     continue
 
                 hs = estrai_score(
@@ -1381,6 +1821,9 @@ def recupera_h2h(
                     "away_score": ass
                 })
 
+            if len(risultati) >= 5:
+                break
+
     risultati.sort(
         key=lambda x: x["date"],
         reverse=True
@@ -1398,7 +1841,16 @@ def recupera_h2h(
 
 # ============================================================
 # INFORTUNI
+#
+# Verificato empiricamente: l'endpoint ESPN per gli
+# infortuni calcistici restituisce sempre un oggetto
+# vuoto. Si prova comunque (per futura disponibilità),
+# ma i risultati vuoti vengono memorizzati con TTL
+# lungo per non sprecare richieste.
 # ============================================================
+
+_PROBE_INFORTUNI: Dict[str, Tuple[str, float]] = {}
+
 
 def estrai_infortuni_ricorsivo(
     obj: Any,
@@ -1452,6 +1904,18 @@ def recupera_infortuni(
     if not team_id:
         return None
 
+    # La lega risulta 'vuota' di recente: salto
+    probe = _PROBE_INFORTUNI.get(
+        league
+    )
+
+    if (
+        probe
+        and probe[0] == "vuoto"
+        and time.time() - probe[1] < CACHE_TTL_NEGATIVE
+    ):
+        return None
+
     cache_key = (
         f"injuries_{league}_"
         f"{team_id}"
@@ -1485,6 +1949,11 @@ def recupera_infortuni(
                 f"HTTP {response.status_code}"
             )
 
+            _PROBE_INFORTUNI[league] = (
+                "vuoto",
+                time.time()
+            )
+
             return None
 
         data = response.json()
@@ -1493,6 +1962,27 @@ def recupera_infortuni(
             estrai_infortuni_ricorsivo(
                 data
             )
+        )
+
+        if not lista:
+
+            # Endpoint vuoto: memo + cache negativa
+            _PROBE_INFORTUNI[league] = (
+                "vuoto",
+                time.time()
+            )
+
+            cache_set(
+                cache_key,
+                [],
+                CACHE_TTL_NEGATIVE
+            )
+
+            return None
+
+        _PROBE_INFORTUNI[league] = (
+            "ok",
+            time.time()
         )
 
         unici = []
@@ -1604,12 +2094,13 @@ def format_infortuni(
         )
 
         testo = (
-            f"• {nome} — {stato}"
+            f"• {html_safe(nome)} — "
+            f"{html_safe(stato)}"
         )
 
         if motivo:
             testo += (
-                f" ({motivo})"
+                f" ({html_safe(motivo)})"
             )
 
         righe.append(
@@ -1632,112 +2123,32 @@ def format_infortuni(
 # EUROPA
 # ============================================================
 
-def evento_europeo(
+def competizione_europea(
     evento: Dict[str, Any]
 ) -> Optional[str]:
 
-    testo = ""
-
-    league_obj = evento.get(
-        "league",
-        {}
+    slug = slug_competizione(
+        evento
     )
 
-    if isinstance(
-        league_obj,
-        dict
+    if slug in COMPETIZIONI_EUROPEE:
+        return COMPETIZIONI_EUROPEE[slug]
+
+    if slug.startswith(
+        "uefa."
     ):
 
-        testo += " "
+        league_obj = evento.get(
+            "league",
+            {}
+        )
 
-        testo += str(
+        return (
             league_obj.get(
-                "name",
-                ""
+                "name"
             )
+            or slug
         )
-
-        testo += " "
-
-        testo += str(
-            league_obj.get(
-                "slug",
-                ""
-            )
-        )
-
-        testo += " "
-
-        testo += str(
-            league_obj.get(
-                "abbreviation",
-                ""
-            )
-        )
-
-    competitions = evento.get(
-        "competitions",
-        []
-    )
-
-    for competition in competitions:
-
-        if not isinstance(
-            competition,
-            dict
-        ):
-            continue
-
-        testo += " "
-
-        testo += str(
-            competition.get(
-                "name",
-                ""
-            )
-        )
-
-        testo += " "
-
-        testo += str(
-            competition.get(
-                "type",
-                ""
-            )
-        )
-
-    testo = normalizza_nome(
-        testo
-    )
-
-    if "champions" in testo:
-        return "Champions League"
-
-    if (
-        "europa league" in testo
-        or "europa" in testo
-    ):
-        return "Europa League"
-
-    if (
-        "conference league" in testo
-        or "conference" in testo
-    ):
-        return "Conference League"
-
-    raw = json.dumps(
-        evento,
-        ensure_ascii=False
-    ).lower()
-
-    if "uefa.champions" in raw:
-        return "Champions League"
-
-    if "uefa.europa.conf" in raw:
-        return "Conference League"
-
-    if "uefa.europa" in raw:
-        return "Europa League"
 
     return None
 
@@ -1754,10 +2165,13 @@ def verifica_impegni_europei(
             "ultima": None
         }
 
-    calendario = (
-        recupera_calendario_completo_squadra(
-            team_id
-        )
+    oggi = datetime.now(
+        timezone.utc
+    )
+
+    calendario = storia_squadra(
+        team_id,
+        oggi
     )
 
     if calendario is None:
@@ -1767,10 +2181,6 @@ def verifica_impegni_europei(
             "competizioni": [],
             "ultima": None
         }
-
-    oggi = datetime.now(
-        timezone.utc
-    )
 
     limite = (
         oggi
@@ -1782,7 +2192,8 @@ def verifica_impegni_europei(
     for evento in calendario:
 
         if not evento_terminato(
-            evento
+            evento,
+            oggi
         ):
             continue
 
@@ -1800,7 +2211,7 @@ def verifica_impegni_europei(
             continue
 
         competizione = (
-            evento_europeo(
+            competizione_europea(
                 evento
             )
         )
@@ -2093,10 +2504,6 @@ def calcola_probabilita(
 
     home_norm = normalizza_nome(
         home_name
-    )
-
-    away_norm = normalizza_nome(
-        away_name
     )
 
     for match in h2h:
@@ -2492,20 +2899,22 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
-    # FORMA
+    # FORMA (storia squadra: tutte le competizioni)
     # --------------------------------------------------------
 
     form_home = (
         recupera_form_da_eventi(
             home_name,
-            league
+            league,
+            home_id
         )
     )
 
     form_away = (
         recupera_form_da_eventi(
             away_name,
-            league
+            league,
+            away_id
         )
     )
 
@@ -2554,7 +2963,7 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
-    # H2H
+    # H2H (tutte le competizioni, 2 stagioni)
     # --------------------------------------------------------
 
     h2h = recupera_h2h(
@@ -2768,7 +3177,8 @@ def format_europa(
         )
 
     return ", ".join(
-        competizioni
+        html_safe(c)
+        for c in competizioni
     )
 
 
@@ -2781,8 +3191,13 @@ def format_report_partita(
     numero: int
 ) -> str:
 
-    home = analisi["home"]
-    away = analisi["away"]
+    home = html_safe(
+        analisi["home"]
+    )
+
+    away = html_safe(
+        analisi["away"]
+    )
 
     sh = analisi["stats_home"]
     sa = analisi["stats_away"]
@@ -2853,10 +3268,10 @@ def format_report_partita(
 
             righe_h2h.append(
                 f"• {data}: "
-                f"{match['home']} "
+                f"{html_safe(match['home'])} "
                 f"{match['home_score']}-"
                 f"{match['away_score']} "
-                f"{match['away']}"
+                f"{html_safe(match['away'])}"
             )
 
         h2h_text = "\n".join(
@@ -2966,7 +3381,10 @@ Goal attesi: <b>{analisi['expected_goals']:.2f}</b>
 # ============================================================
 
 def crea_report(
-    campionato_key: str
+    campionato_key: str,
+    on_progress: Optional[
+        Any
+    ] = None
 ) -> Optional[str]:
 
     if campionato_key not in CAMPIONATI:
@@ -3003,7 +3421,7 @@ def crea_report(
         return (
             f"⚠️ Non sono state trovate "
             f"partite future per "
-            f"<b>{nome_campionato}</b> "
+            f"<b>{html_safe(nome_campionato)}</b> "
             f"nei prossimi "
             f"{GIORNI_FUTURI} giorni."
         )
@@ -3039,6 +3457,14 @@ def crea_report(
                     analisi
                 )
 
+                if on_progress:
+                    on_progress(
+                        indice,
+                        len(partite),
+                        analisi["home"],
+                        analisi["away"]
+                    )
+
         except Exception as exc:
 
             print(
@@ -3060,7 +3486,7 @@ def crea_report(
         return (
             f"⚠️ Nessun pronostico valido "
             f"generato per "
-            f"{nome_campionato}."
+            f"{html_safe(nome_campionato)}."
         )
 
     print(
@@ -3073,7 +3499,7 @@ def crea_report(
     intestazione = f"""
 <b>⚽ BOT PRONOSTICI CALCIO</b>
 
-<b>{nome_campionato}</b>
+<b>{html_safe(nome_campionato)}</b>
 
 📅 Analisi delle prossime partite
 
@@ -3120,8 +3546,8 @@ def crea_report(
 
         righe.append(
             f"• <b>"
-            f"{analisi['home']} - "
-            f"{analisi['away']}"
+            f"{html_safe(analisi['home'])} - "
+            f"{html_safe(analisi['away'])}"
             f"</b>"
         )
 
@@ -3270,7 +3696,8 @@ def invia_report(
                 bot.send_message(
                     chat_id,
                     testo_pulito,
-                    disable_web_page_preview=True
+                    disable_web_page_preview=True,
+                    parse_mode=None
                 )
 
                 print(
@@ -3339,11 +3766,11 @@ def campionato_da_espn(
 
 
 # ============================================================
-# HANDLER /START
+# HANDLER /START E /HELP
 # ============================================================
 
 @bot.message_handler(
-    commands=["start"]
+    commands=["start", "help"]
 )
 def comando_start(message):
 
@@ -3361,9 +3788,9 @@ Seleziona il campionato da analizzare.
 
 Il bot elaborerà:
 
-• forma recente
+• forma recente (ultime 10, tutte le competizioni)
 • rendimento casa/trasferta
-• H2H
+• H2H ultime 5 (tutte le competizioni)
 • impegni europei
 • infortuni disponibili
 • riposo/fatica
@@ -3388,56 +3815,64 @@ Il bot elaborerà:
 # HANDLER TESTO
 # ============================================================
 
+ALIASES_CAMPIONATO = {
+    "serie a": "ita.1",
+    "seriea": "ita.1",
+    "a": "ita.1",
+    "italy": "ita.1",
+    "italia": "ita.1",
+    "premier league": "eng.1",
+    "premier": "eng.1",
+    "england": "eng.1",
+    "ingleterra": "eng.1",
+    "la liga": "esp.1",
+    "liga": "esp.1",
+    "spagna": "esp.1",
+    "bundesliga": "ger.1",
+    "germania": "ger.1",
+    "germany": "ger.1",
+    "ligue 1": "fra.1",
+    "ligue1": "fra.1",
+    "francia": "fra.1",
+}
+
+
 @bot.message_handler(
     func=lambda message: True
 )
 def messaggio_generico(message):
 
-    testo = (
-        message.text or ""
+    raw = (
+        message.text
+        or message.caption
+        or ""
+    ).strip()
+
+    # rimuove emoji e punteggi, minuscolo
+    testo = re.sub(
+        r"[^\w\s]",
+        " ",
+        raw,
+        flags=re.UNICODE
     ).strip().lower()
 
-    if testo in {
-        "serie a",
-        "🇮🇹 serie a"
-    }:
+    testo = re.sub(
+        r"\s+",
+        " ",
+        testo
+    )
 
-        league = "ita.1"
+    league = ALIASES_CAMPIONATO.get(
+        testo
+    )
 
-    elif testo in {
-        "premier league",
-        "🏴 premier league"
-    }:
-
-        league = "eng.1"
-
-    elif testo in {
-        "la liga",
-        "🇪🇸 la liga"
-    }:
-
-        league = "esp.1"
-
-    elif testo in {
-        "bundesliga",
-        "🇩🇪 bundesliga"
-    }:
-
-        league = "ger.1"
-
-    elif testo in {
-        "ligue 1",
-        "🇫🇷 ligue 1"
-    }:
-
-        league = "fra.1"
-
-    else:
+    if not league:
 
         bot.send_message(
             message.chat.id,
             "Usa /start per scegliere "
-            "il campionato."
+            "il campionato.",
+            reply_markup=crea_menu_campionati()
         )
 
         return
@@ -3454,11 +3889,23 @@ def messaggio_generico(message):
 
 @bot.callback_query_handler(
     func=lambda call:
-    call.data.startswith(
-        "campionato:"
+    (
+        call.data
+        and call.data.startswith(
+            "campionato:"
+        )
     )
 )
 def callback_campionato(call):
+
+    if not call.message:
+
+        bot.answer_callback_query(
+            call.id,
+            "Premi /start per riavviare il menu."
+        )
+
+        return
 
     league = call.data.split(
         ":",
@@ -3480,6 +3927,15 @@ def callback_campionato(call):
 # AVVIO ANALISI
 # ============================================================
 
+_CHAT_LOCK = threading.Lock()
+_CHAT_IN_ANALISI: set = set()
+_SEMAFORO_ANALISI = (
+    threading.Semaphore(
+        ANALISI_MAX_SIMULTANEE
+    )
+)
+
+
 def avvia_analisi_chat(
     chat_id: int,
     league: str
@@ -3493,10 +3949,15 @@ def avvia_analisi_chat(
 
     if not nome_key:
 
-        bot.send_message(
-            chat_id,
-            "❌ Campionato non riconosciuto."
-        )
+        try:
+            bot.send_message(
+                chat_id,
+                "❌ Campionato non riconosciuto."
+            )
+        except Exception as exc:
+            print(
+                f"❌ Errore risposta invio: {exc}"
+            )
 
         return
 
@@ -3504,66 +3965,150 @@ def avvia_analisi_chat(
         nome_key
     ]["nome"]
 
-    try:
+    with _CHAT_LOCK:
 
-        bot.send_message(
-            chat_id,
-            (
-                f"⏳ <b>Analisi {nome} "
-                f"in corso...</b>\n\n"
-                "Sto recuperando le partite "
-                "e i dati statistici.\n"
-                "Potrebbero essere necessari "
-                "alcuni secondi."
-            )
-        )
+        if chat_id in _CHAT_IN_ANALISI:
 
-    except Exception as exc:
+            try:
+                bot.send_message(
+                    chat_id,
+                    (
+                        "⏳ Un'analisi è già in "
+                        "corso per questa chat.\n"
+                        "Attendi il completamento "
+                        "del report."
+                    )
+                )
+            except Exception:
+                pass
 
-        print(
-            f"⚠️ Impossibile inviare "
-            f"messaggio iniziale: {exc}"
+            return
+
+        _CHAT_IN_ANALISI.add(
+            chat_id
         )
 
     def lavoro():
 
         try:
 
-            print(
-                f"🚀 Avvio analisi Telegram: "
-                f"{nome}"
-            )
+            _SEMAFORO_ANALISI.acquire()
 
-            report = crea_report(
-                nome_key
-            )
+            try:
 
-            if not report:
-
-                bot.send_message(
-                    chat_id,
-                    "❌ Nessun report disponibile."
+                print(
+                    f"🚀 Avvio analisi Telegram: "
+                    f"{nome}"
                 )
 
-                return
+                # messaggio di stato (editato in tempo reale)
+                status_id = None
 
-            print(
-                "📊 Report generato."
-            )
+                try:
+                    msg = bot.send_message(
+                        chat_id,
+                        (
+                            f"⏳ <b>Analisi {nome} "
+                            f"in corso...</b>\n\n"
+                            "Sto recuperando le "
+                            "partite e i dati "
+                            "statistici da ESPN.\n"
+                            "🔎 0 completate"
+                        )
+                    )
+                    status_id = msg.message_id
+                except Exception as exc:
+                    print(
+                        f"⚠️ Impossibile inviare "
+                        f"messaggio iniziale: {exc}"
+                    )
 
-            print(
-                "📤 Avvio invio Telegram..."
-            )
+                def progresso(
+                    indice: int,
+                    totale: int,
+                    home: str,
+                    away: str
+                ):
 
-            invia_report(
-                chat_id,
-                report
-            )
+                    if not status_id:
+                        return
 
-            print(
-                f"✅ ELABORAZIONE "
-                f"{nome} TERMINATA."
-            )
+                    try:
+                        bot.edit_message_text(
+                            (
+                                f"⏳ <b>Analisi {nome} "
+                                f"in corso...</b>\n\n"
+                                f"✅ {indice}/{totale} "
+                                f"partite analizzate\n"
+                                f"🔎 Ultima: "
+                                f"<b>{html_safe(home)} - "
+                                f"{html_safe(away)}</b>"
+                            ),
+                            chat_id=chat_id,
+                            message_id=status_id
+                        )
+                    except Exception as exc:
+                        print(
+                            f"⚠️ Errore edit "
+                            f"progresso: {exc}"
+                        )
+
+                report = crea_report(
+                    nome_key,
+                    on_progress=progresso
+                )
+
+                if not report:
+
+                    if status_id:
+                        try:
+                            bot.edit_message_text(
+                                (
+                                    "❌ Nessun report "
+                                    "disponibile."
+                                ),
+                                chat_id=chat_id,
+                                message_id=status_id
+                            )
+                        except Exception:
+                            pass
+
+                    try:
+                        bot.send_message(
+                            chat_id,
+                            "❌ Nessun report disponibile."
+                        )
+                    except Exception:
+                        pass
+
+                    return
+
+                if status_id:
+                    try:
+                        bot.edit_message_text(
+                            (
+                                "✅ Analisi completata.\n"
+                                "📨 Invio del report..."
+                            ),
+                            chat_id=chat_id,
+                            message_id=status_id
+                        )
+                    except Exception:
+                        pass
+
+                invia_report(
+                    chat_id,
+                    report
+                )
+
+                print(
+                    f"✅ ELABORAZIONE "
+                    f"{nome} TERMINATA."
+                )
+
+            finally:
+
+                _SEMAFORO_ANALISI.release()
 
         except Exception as exc:
 
@@ -3573,7 +4118,6 @@ def avvia_analisi_chat(
             )
 
             try:
-
                 bot.send_message(
                     chat_id,
                     (
@@ -3583,7 +4127,6 @@ def avvia_analisi_chat(
                         "Controlla i log di Render."
                     )
                 )
-
             except Exception as exc2:
 
                 print(
@@ -3591,10 +4134,66 @@ def avvia_analisi_chat(
                     f"Telegram: {exc2}"
                 )
 
+        finally:
+
+            with _CHAT_LOCK:
+                _CHAT_IN_ANALISI.discard(
+                    chat_id
+                )
+
     threading.Thread(
         target=lavoro,
         daemon=True
     ).start()
+
+
+# ============================================================
+# WORKER AGGIORNAMENTI (coda + thread unico)
+# ============================================================
+
+def worker_aggiornamenti():
+
+    print(
+        "⚙️ Worker aggiornamenti avviato."
+    )
+
+    while True:
+
+        body = (
+            _UPDATE_QUEUE.get()
+        )
+
+        try:
+
+            data = json.loads(
+                body.decode(
+                    "utf-8"
+                )
+            )
+
+            update = (
+                types.Update.de_json(
+                    json.dumps(data)
+                )
+            )
+
+            if update:
+
+                bot.process_new_updates(
+                    [update]
+                )
+
+                print(
+                    "✅ Update Telegram "
+                    "elaborato."
+                )
+
+        except Exception as exc:
+
+            print(
+                "❌ Errore elaborazione "
+                f"update Telegram: {exc}"
+            )
 
 
 # ============================================================
@@ -3622,9 +4221,11 @@ class HealthHandler(
             risposta = {
                 "status": "ok",
                 "service": "bot-pronostici-gratis",
-                "telegram": "webhook",
-                "polling": False,
-                "webhook": WEBHOOK_URL
+                "modalita": MODALITA,
+                "webhook": WEBHOOK_URL,
+                "tempo": int(
+                    time.time()
+                )
             }
 
             body = json.dumps(
@@ -3675,6 +4276,23 @@ class HealthHandler(
 
         try:
 
+            # Autenticazione secret token
+            if (
+                TELEGRAM_SECRET_TOKEN
+                and self.headers.get(
+                    "X-Telegram-Bot-Api-Secret-Token"
+                )
+                != TELEGRAM_SECRET_TOKEN
+            ):
+
+                self.send_response(
+                    403
+                )
+
+                self.end_headers()
+
+                return
+
             content_length = int(
                 self.headers.get(
                     "Content-Length",
@@ -3688,16 +4306,11 @@ class HealthHandler(
 
             print(
                 f"📩 POST RICEVUTA: "
-                f"{self.path}"
+                f"{self.path} "
+                f"({len(body)} byte)"
             )
 
-            print(
-                f"📩 Dimensione richiesta: "
-                f"{len(body)} byte"
-            )
-
-            # Risposta immediata
-            # a Telegram
+            # Risposta immediata a Telegram
             self.send_response(
                 200
             )
@@ -3713,50 +4326,11 @@ class HealthHandler(
                 b'{"ok":true}'
             )
 
-            # Elaborazione separata
-            def process_update():
-
-                try:
-
-                    data = json.loads(
-                        body.decode(
-                            "utf-8"
-                        )
-                    )
-
-                    print(
-                        "⚙️ Elaborazione "
-                        "update Telegram..."
-                    )
-
-                    update = (
-                        types.Update.de_json(
-                            json.dumps(data)
-                        )
-                    )
-
-                    if update:
-
-                        bot.process_new_updates(
-                            [update]
-                        )
-
-                        print(
-                            "✅ Update Telegram "
-                            "elaborato."
-                        )
-
-                except Exception as exc:
-
-                    print(
-                        "❌ Errore elaborazione "
-                        f"update Telegram: {exc}"
-                    )
-
-            threading.Thread(
-                target=process_update,
-                daemon=True
-            ).start()
+            # Elaborazione in coda
+            # (worker unico, sequenziale)
+            _UPDATE_QUEUE.put(
+                body
+            )
 
         except Exception as exc:
 
@@ -3766,13 +4340,11 @@ class HealthHandler(
             )
 
             try:
-
                 self.send_response(
                     500
                 )
 
                 self.end_headers()
-
             except Exception:
                 pass
 
@@ -3781,7 +4353,62 @@ class HealthHandler(
 # WEBHOOK TELEGRAM
 # ============================================================
 
-def configura_webhook():
+def _webhook_raggiungibile() -> bool:
+
+    try:
+
+        response = requests.get(
+            WEBHOOK_URL
+            + "/health",
+            timeout=10
+        )
+
+        return (
+            response.status_code == 200
+        )
+
+    except Exception as exc:
+
+        print(
+            f"⚠️ Self-check webhook: {exc}"
+        )
+
+        return False
+
+
+def _avvia_polling_fallback():
+
+    print(
+        "🔄 Fallback: avvio POLLING "
+        "Telegram..."
+    )
+
+    def _loop():
+
+        while True:
+
+            try:
+                bot.infinity_polling(
+                    timeout=30,
+                    long_polling_timeout=30,
+                    skip_pending=True
+                )
+            except Exception as exc:
+                print(
+                    f"❌ Errore polling "
+                    f"(riprovo in 10s): {exc}"
+                )
+                time.sleep(10)
+
+    threading.Thread(
+        target=_loop,
+        daemon=True
+    ).start()
+
+
+def configura_webhook() -> bool:
+
+    global MODALITA
 
     print()
     print("=" * 50)
@@ -3797,51 +4424,104 @@ def configura_webhook():
 
     print("=" * 50)
 
+    for tentativo in range(1, 4):
+
+        print(
+            f"🔗 Tentativo {tentativo}/3..."
+        )
+
+        try:
+
+            try:
+                bot.remove_webhook()
+                time.sleep(0.5)
+            except Exception as exc:
+                print(
+                    f"ℹ️ remove_webhook: {exc}"
+                )
+
+            risultato = bot.set_webhook(
+                url=WEBHOOK_URL,
+                drop_pending_updates=True,
+                secret_token=TELEGRAM_SECRET_TOKEN,
+                max_connections=40
+            )
+
+            if not risultato:
+                raise RuntimeError(
+                    "set_webhook ha restituito False"
+                )
+
+            print(
+                f"✅ Webhook configurato: "
+                f"{risultato}"
+            )
+
+            # Self-check: il nostro server deve
+            # essere raggiungibile dall'esterno
+            if _webhook_raggiungibile():
+
+                MODALITA = "webhook"
+
+                print(
+                    "✅ Self-check OK: webhook "
+                    "modalità operativa."
+                )
+
+                return True
+
+            print(
+                "⚠️ Webhook impostato ma "
+                "l'URL non è ancora "
+                "raggiungibile dall'esterno."
+            )
+
+        except Exception as exc:
+
+            print(
+                f"❌ Errore configurazione "
+                f"webhook: {exc}"
+            )
+
+        time.sleep(5)
+
+    # Fallback: polling
     try:
-
-        print(
-            "🧹 Rimozione eventuale "
-            "webhook precedente..."
-        )
-
         bot.remove_webhook()
+    except Exception:
+        pass
 
-        time.sleep(1)
+    MODALITA = "polling"
 
-        print(
-            "🔗 Impostazione nuovo webhook..."
-        )
+    _avvia_polling_fallback()
 
-        risultato = bot.set_webhook(
-            url=WEBHOOK_URL,
-            drop_pending_updates=True
-        )
+    print(
+        "🏁 Bot operativo in modalità "
+        "POLLING (il webhook non era "
+        "disponibile)."
+    )
 
-        print(
-            f"✅ Webhook configurato: "
-            f"{risultato}"
-        )
-
-        print(
-            "🏁 Configurazione Telegram "
-            "completata."
-        )
-
-        return True
-
-    except Exception as exc:
-
-        print(
-            f"❌ Errore configurazione "
-            f"webhook: {exc}"
-        )
-
-        return False
+    return False
 
 
 # ============================================================
 # MAIN
 # ============================================================
+
+_shutdown = threading.Event()
+
+
+def _sigterm_handler(
+    signum,
+    frame
+):
+
+    print(
+        "🛑 Segnale di arresto ricevuto."
+    )
+
+    _shutdown.set()
+
 
 def main():
 
@@ -3858,10 +4538,21 @@ def main():
 
     print("=" * 50)
 
-    print(
-        "🚀 Avvio server HTTP Render..."
-    )
+    try:
+        signal.signal(
+            signal.SIGTERM,
+            _sigterm_handler
+        )
+    except Exception:
+        pass
 
+    # Worker aggiornamenti (coda)
+    threading.Thread(
+        target=worker_aggiornamenti,
+        daemon=True
+    ).start()
+
+    # Server HTTP (thread dedicato)
     server = ThreadingHTTPServer(
         (
             "0.0.0.0",
@@ -3870,9 +4561,10 @@ def main():
         HealthHandler
     )
 
-    print(
-        "Server Render attivo."
-    )
+    threading.Thread(
+        target=server.serve_forever,
+        daemon=True
+    ).start()
 
     print(
         f"🌐 Server HTTP avviato "
@@ -3884,6 +4576,7 @@ def main():
         f"{RENDER_EXTERNAL_URL}/health"
     )
 
+    # Webhook (con self-check e fallback)
     webhook_ok = (
         configura_webhook()
     )
@@ -3892,7 +4585,8 @@ def main():
 
         print(
             "❌ ATTENZIONE: webhook Telegram "
-            "non configurato."
+            "non configurato, bot in "
+            "modalità polling."
         )
 
     print()
@@ -3903,22 +4597,24 @@ def main():
     )
 
     print(
-        "✅ MODALITÀ: WEBHOOK"
+        f"✅ MODALITÀ: "
+        f"{MODALITA.upper()}"
     )
 
     print(
-        "❌ POLLING: DISATTIVATO"
-    )
-
-    print(
-        "❌ CLASSIFICA: DISATTIVATA"
+        "✅ POLLING: "
+        + (
+            "ATTIVATO (fallback)"
+            if MODALITA == "polling"
+            else "DISATTIVATO"
+        )
     )
 
     print("=" * 50)
 
     try:
 
-        server.serve_forever()
+        _shutdown.wait()
 
     except KeyboardInterrupt:
 
@@ -3930,11 +4626,14 @@ def main():
 
         try:
             bot.remove_webhook()
-
         except Exception:
             pass
 
-        server.server_close()
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
 
         print(
             "🛑 Server arrestato."
