@@ -4770,12 +4770,15 @@ def format_schedina(
 
 
 def crea_schedine(
+    cap: Optional[float] = None,
     on_progress: Optional[Any] = None
 ) -> Optional[List[str]]:
 
     print()
     print("=" * 50)
-    print("🎟 RICHIESTA SCHEDINE")
+    print("🎟 RICHIESTA SCHEDINE (cap: "
+          + (str(cap) if cap else "tutte")
+          + ")")
     print("=" * 50)
 
     pool = []
@@ -4789,15 +4792,33 @@ def crea_schedine(
 
     per_lega = []
 
-    for chiave, config in leghe:
+    def _partite(pair):
 
-        league = config["espn"]
+        league = pair[1]["espn"]
 
-        partite = (
-            recupera_partite_future(
-                league
+        try:
+            return league, (
+                recupera_partite_future(
+                    league
+                )
             )
+
+        except Exception as exc:
+            print(
+                f"⚠️ Partite {league}: {exc}"
+            )
+
+            return league, []
+
+    # 5 campionati IN PARALLELO
+    with ThreadPoolExecutor(
+        max_workers=5
+    ) as ex:
+        risultati = list(
+            ex.map(_partite, leghe)
         )
+
+    for league, partite in risultati:
 
         per_lega.append(
             (league, partite)
@@ -4811,7 +4832,51 @@ def crea_schedine(
 
         return None
 
+    compiti = []
+
     for league, partite in per_lega:
+
+        for evento in partite:
+
+            compiti.append(
+                (league, evento, len(partite))
+            )
+
+    def _analizza(compito):
+
+        league, evento, tot = compito
+
+        try:
+            return league, (
+                analizza_partita(
+                    evento,
+                    league,
+                    0,
+                    tot
+                )
+            )
+
+        except Exception as exc:
+
+            print(
+                f"❌ Errore analisi "
+                f"partita: {exc}"
+            )
+
+            return league, None
+
+    # fino a 4 analisi simultanee (storie squadra
+    # e cache sono thread-safe)
+    with ThreadPoolExecutor(
+        max_workers=4
+    ) as ex:
+        risultati = list(
+            ex.map(_analizza, compiti)
+        )
+
+    for league, analisi in risultati:
+
+        fatti += 1
 
         nome = (
             CAMPIONATI.get(
@@ -4825,59 +4890,34 @@ def crea_schedine(
             )
         )
 
-        for indice, evento in enumerate(
-            partite,
-            start=1
-        ):
+        if analisi:
 
-            try:
+            analisi["league"] = league
 
-                analisi = analizza_partita(
-                    evento,
-                    league,
-                    indice,
-                    len(partite)
+            pool.extend(
+                migliori_pick(
+                    analisi,
+                    max_pick=2
                 )
+            )
 
-            except Exception as exc:
+        if on_progress:
 
-                print(
-                    f"❌ Errore analisi "
-                    f"partita: {exc}"
+            on_progress(
+                fatti,
+                totali,
+                nome,
+                (
+                    analisi["home"]
+                    if analisi
+                    else "?"
+                ),
+                (
+                    analisi["away"]
+                    if analisi
+                    else "?"
                 )
-
-                analisi = None
-
-            fatti += 1
-
-            if analisi:
-
-                analisi["league"] = league
-
-                pool.extend(
-                    migliori_pick(
-                        analisi,
-                        max_pick=2
-                    )
-                )
-
-            if on_progress:
-
-                on_progress(
-                    fatti,
-                    totali,
-                    nome,
-                    (
-                        analisi["home"]
-                        if analisi
-                        else "?"
-                    ),
-                    (
-                        analisi["away"]
-                        if analisi
-                        else "?"
-                    )
-                )
+            )
 
     print(
         f"🎟 Partite analizzate: "
@@ -4945,7 +4985,39 @@ def crea_schedine(
     if not schedine:
         return None
 
-    print("📨 Schedine create.")
+    # Se e' stato richiesto un cap specifico (click su un
+    # singolo pulsante) restituisce SOLO quella schedina.
+    if cap:
+
+        selezionate = [
+            s for s in schedine
+            if abs(
+                float(s["tier"]["cap"])
+                - float(cap)
+            ) < 0.5
+        ]
+
+        if not selezionate:
+
+            disponibili = ", ".join(
+                f"{s['tier']['cap']:.0f} "
+                f"({s['quota_tot']:.2f})"
+                for s in schedine
+            )
+
+            print("Nessuna schedina per cap " + str(cap))
+
+            return [
+                "Non sono riuscito a costruire una "
+                "schedina entro quota "
+                f"{cap:.0f}.\n\n"
+                "Quelle riuscite: "
+                + disponibili
+            ]
+
+        schedine = selezionate
+
+    print("Schedine create: " + str(len(schedine)))
 
     return [
         format_schedina(s)
@@ -5114,6 +5186,19 @@ def messaggio_generico(message):
         testo
     )
 
+    if testo in {
+        "schedina",
+        "schedine",
+        "biglietto"
+    }:
+
+        avvia_schedina_chat(
+            message.chat.id,
+            None
+        )
+
+        return
+
     league = ALIASES_CAMPIONATO.get(
         testo
     )
@@ -5150,6 +5235,8 @@ def messaggio_generico(message):
 )
 def callback_campionato(call):
 
+    print("CLICK CAMPIONATO ricevuto: " + str(getattr(call, "data", "?")))
+
     if not call.message:
 
         bot.answer_callback_query(
@@ -5164,10 +5251,17 @@ def callback_campionato(call):
         1
     )[1]
 
-    bot.answer_callback_query(
-        call.id,
-        "Analisi avviata..."
-    )
+    try:
+
+        bot.answer_callback_query(
+            call.id,
+            "Analisi avviata..."
+        )
+
+    except Exception as exc:
+        print(
+            f"⚠️ Toast campionato: {exc}"
+        )
 
     avvia_analisi_chat(
         call.message.chat.id,
@@ -5185,6 +5279,8 @@ def callback_campionato(call):
     )
 )
 def callback_schedina(call):
+
+    print("CLICK SCHEDINA ricevuto: " + str(getattr(call, "data", "?")))
 
     if not call.message:
 
@@ -5205,10 +5301,17 @@ def callback_schedina(call):
     except Exception:
         cap = 10.0
 
-    bot.answer_callback_query(
-        call.id,
-        "🎟 Preparo le schedine..."
-    )
+    try:
+
+        bot.answer_callback_query(
+            call.id,
+            "🎟 Preparo le schedine..."
+        )
+
+    except Exception as exc:
+        print(
+            f"⚠️ Toast schedina: {exc}"
+        )
 
     avvia_schedina_chat(
         call.message.chat.id,
@@ -5530,6 +5633,7 @@ def avvia_schedina_chat(
                         )
 
                 testi = crea_schedine(
+                    cap,
                     on_progress=progresso
                 )
 
@@ -5942,9 +6046,12 @@ def configura_webhook() -> bool:
                     f"ℹ️ remove_webhook: {exc}"
                 )
 
+            # drop_pending_updates=False: gli update (click,
+            # comandi) arrivati mentre il servizio era offline
+            # NON vengono scartati ma consegnati al riavvio.
             risultato = bot.set_webhook(
                 url=WEBHOOK_URL,
-                drop_pending_updates=True,
+                drop_pending_updates=False,
                 secret_token=TELEGRAM_SECRET_TOKEN,
                 max_connections=40
             )
