@@ -32,6 +32,13 @@ RENDER_EXTERNAL_URL = os.getenv(
 WEBHOOK_PATH = "/telegram/webhook"
 WEBHOOK_URL = RENDER_EXTERNAL_URL + WEBHOOK_PATH
 
+# Tipi di update gestiti: da passare SEMPRE esplicitamente a
+# set_webhook e infinity_polling. Senza questo Telegram usa
+# l'impostazione precedente (sticky): se storicamente erano
+# attivi solo i "message", i click sui pulsanti
+# (callback_query) NON vengono MAI consegnati.
+ALLOWED_UPDATES = ["message", "callback_query"]
+
 # Token segreto per autenticare le richieste webhook di Telegram.
 # Se non fornito viene generato al pronto e passato a set_webhook.
 TELEGRAM_SECRET_TOKEN = (
@@ -5976,16 +5983,24 @@ def _webhook_raggiungibile() -> bool:
     except Exception as exc:
 
         print(
-            f"⚠️ Self-check webhook: {exc}"
+            f"\u26a0\ufe0f Self-check webhook: {exc}"
         )
 
         return False
 
 
+_POLLING_ATTIVO = [False]
+
+
 def _avvia_polling_fallback():
 
+    if _POLLING_ATTIVO[0]:
+        return
+
+    _POLLING_ATTIVO[0] = True
+
     print(
-        "🔄 Fallback: avvio POLLING "
+        "\U0001f504 Fallback: avvio POLLING "
         "Telegram..."
     )
 
@@ -5997,11 +6012,12 @@ def _avvia_polling_fallback():
                 bot.infinity_polling(
                     timeout=30,
                     long_polling_timeout=30,
-                    skip_pending=True
+                    skip_pending=False,
+                    allowed_updates=ALLOWED_UPDATES
                 )
             except Exception as exc:
                 print(
-                    f"❌ Errore polling "
+                    f"\u274c Errore polling "
                     f"(riprovo in 10s): {exc}"
                 )
                 time.sleep(10)
@@ -6012,6 +6028,49 @@ def _avvia_polling_fallback():
     ).start()
 
 
+def _verifica_webhook_background():
+
+    """Verifica posticipata: il webhook e' gia' ATTIVO e
+    gli update vengono elaborati dal worker; qui controlla
+    solo che l'URL pubblico risponda. Se dopo 3 minuti non
+    e' ancora raggiungibile (Render molto lento a bootare
+    o egress bloccato) passa al polling.
+    """
+
+    for i in range(18):
+
+        if _shutdown.is_set():
+            return
+
+        if _webhook_raggiungibile():
+
+            print(
+                "\u2705 Self-check OK "
+                f"(al tentativo {i + 1}): "
+                "webhook confermato."
+            )
+
+            return
+
+        time.sleep(10)
+
+    print(
+        "\u26a0\ufe0f URL pubblico non raggiungibile "
+        "dopo 3 minuti: passo a POLLING."
+    )
+
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+
+    global MODALITA
+
+    MODALITA = "polling"
+
+    _avvia_polling_fallback()
+
+
 def configura_webhook() -> bool:
 
     global MODALITA
@@ -6020,20 +6079,27 @@ def configura_webhook() -> bool:
     print("=" * 50)
 
     print(
-        "🌐 CONFIGURAZIONE WEBHOOK TELEGRAM"
+        "\U0001f310 CONFIGURAZIONE WEBHOOK TELEGRAM"
     )
 
     print(
-        f"🌐 URL webhook: "
+        f"\U0001f310 URL webhook: "
         f"{WEBHOOK_URL}"
+    )
+
+    print(
+        f"\U0001f310 Update richiesti: "
+        f"{', '.join(ALLOWED_UPDATES)}"
     )
 
     print("=" * 50)
 
+    impostato = False
+
     for tentativo in range(1, 4):
 
         print(
-            f"🔗 Tentativo {tentativo}/3..."
+            f"\U0001f517 Tentativo {tentativo}/3..."
         )
 
         try:
@@ -6043,17 +6109,19 @@ def configura_webhook() -> bool:
                 time.sleep(0.5)
             except Exception as exc:
                 print(
-                    f"ℹ️ remove_webhook: {exc}"
+                    f"\u2139\ufe0f remove_webhook: {exc}"
                 )
 
-            # drop_pending_updates=False: gli update (click,
-            # comandi) arrivati mentre il servizio era offline
-            # NON vengono scartati ma consegnati al riavvio.
+            # drop_pending_updates=False: gli update
+            # (click, comandi) arrivati mentre il
+            # servizio era offline NON vengono
+            # scartati ma consegnati al riavvio.
             risultato = bot.set_webhook(
                 url=WEBHOOK_URL,
                 drop_pending_updates=False,
                 secret_token=TELEGRAM_SECRET_TOKEN,
-                max_connections=40
+                max_connections=40,
+                allowed_updates=ALLOWED_UPDATES
             )
 
             if not risultato:
@@ -6061,56 +6129,56 @@ def configura_webhook() -> bool:
                     "set_webhook ha restituito False"
                 )
 
+            impostato = True
+
             print(
-                f"✅ Webhook configurato: "
+                f"\u2705 Webhook configurato: "
                 f"{risultato}"
             )
 
-            # Self-check: il nostro server deve
-            # essere raggiungibile dall'esterno
-            if _webhook_raggiungibile():
-
-                MODALITA = "webhook"
-
-                print(
-                    "✅ Self-check OK: webhook "
-                    "modalità operativa."
-                )
-
-                return True
-
-            print(
-                "⚠️ Webhook impostato ma "
-                "l'URL non è ancora "
-                "raggiungibile dall'esterno."
-            )
+            break
 
         except Exception as exc:
 
             print(
-                f"❌ Errore configurazione "
+                f"\u274c Errore configurazione "
                 f"webhook: {exc}"
             )
 
-        time.sleep(5)
+            time.sleep(5)
 
-    # Fallback: polling
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
+    if not impostato:
 
-    MODALITA = "polling"
+        MODALITA = "polling"
 
-    _avvia_polling_fallback()
+        _avvia_polling_fallback()
+
+        print(
+            "\U0001f3c1 Bot operativo in modalita' "
+            "POLLING (webhook non configurabile)."
+        )
+
+        return False
+
+    # Webhook PRIMARIO: resta attivo fin da subito
+    # (gli update in arrivo vengono comunque
+    # elaborati dal worker). La raggiungibilita'
+    # dell'URL pubblico si verifica in background:
+    # durante il boot di Render il self-check fallisce
+    # sempre, non deve degradare la modalita'.
+    MODALITA = "webhook"
+
+    threading.Thread(
+        target=_verifica_webhook_background,
+        daemon=True
+    ).start()
 
     print(
-        "🏁 Bot operativo in modalità "
-        "POLLING (il webhook non era "
-        "disponibile)."
+        "\u2705 Webhook ATTIVO: verifiche di "
+        "raggiungibilita' in background."
     )
 
-    return False
+    return True
 
 
 # ============================================================
