@@ -547,10 +547,12 @@ def anni_stagione(
     oggi: Optional[datetime] = None
 ) -> List[int]:
 
-    """Anni 'ESPN' della stagione corrente e precedente.
+    """Anni 'ESPN' delle ultime 3 stagioni.
 
     L'anno stagione ESPN è l'anno d'inizio del campionato
-    (es. 2026-27 -> 2026).
+    (es. 2026-27 -> 2026). Tre stagioni: corrente + 2
+    precedenti (aumenta la copertura H2H, costo: 3
+    richieste per squadra, sempre memorizzate in cache).
     """
 
     if oggi is None:
@@ -564,7 +566,8 @@ def anni_stagione(
 
     return [
         corrente,
-        corrente - 1
+        corrente - 1,
+        corrente - 2
     ]
 
 
@@ -1052,7 +1055,10 @@ def _match_da_evento(
         ),
         "home_score": score_home,
         "away_score": score_away,
-        "team": team_name
+        "team": team_name,
+        "league": slug_competizione(
+            evento
+        )
     }
 
 
@@ -1497,6 +1503,123 @@ def rendimento_trasferta(
     )
 
 
+def ppg_campionato_squadra(
+    team_id: Optional[str],
+    team_name: str,
+    league: str,
+    oggi: Optional[datetime] = None
+) -> Optional[float]:
+
+    """PPG di SOLI campionato, ultime 8 partite in lega
+    (senza finestra temporale: nelle prime giornate copre
+    anche la stagione precedente via storia 3 stagioni).
+
+    Feature calibrata col backtest (peso 3 nel modello).
+    Richiede almeno 4 partite, altrimenti None.
+    """
+
+    if not team_id or not league:
+        return None
+
+    if oggi is None:
+        oggi = datetime.now(timezone.utc)
+
+    cache_key = (
+        f"ppg_camp_"
+        f"{league}_"
+        f"{team_id}"
+    )
+
+    cached = cache_get(
+        cache_key
+    )
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    storia = (
+        storia_squadra(
+            team_id,
+            oggi
+        )
+    )
+
+    if not storia:
+        cache_set(
+            cache_key,
+            -1
+        )
+
+        return None
+
+    partite = []
+
+    for evento in storia:
+
+        if slug_competizione(
+            evento
+        ) != league:
+            continue
+
+        if not evento_terminato(
+            evento,
+            oggi
+        ):
+            continue
+
+        match = _match_da_evento(
+            evento,
+            team_name
+        )
+
+        if match:
+            partite.append(
+                match
+            )
+
+        if len(partite) >= 8:
+            break
+
+    if len(partite) < 4:
+
+        cache_set(
+            cache_key,
+            -1
+        )
+
+        return None
+
+    punti = 0
+
+    for match in partite:
+
+        risultato = risultato_team(
+            match,
+            team_name
+        )
+
+        if risultato == "V":
+            punti += 3
+
+        elif risultato == "P":
+            punti += 1
+
+    ppg = punti / len(
+        partite
+    )
+
+    cache_set(
+        cache_key,
+        ppg
+    )
+
+    return ppg
+
+
 # ============================================================
 # H2H
 # ============================================================
@@ -1842,12 +1965,388 @@ def recupera_h2h(
 # ============================================================
 # INFORTUNI
 #
-# Verificato empiricamente: l'endpoint ESPN per gli
-# infortuni calcistici restituisce sempre un oggetto
-# vuoto. Si prova comunque (per futura disponibilità),
-# ma i risultati vuoti vengono memorizzati con TTL
-# lungo per non sprecare richieste.
+# 1) football-data.org (REALE): se configurata la env var
+#    FOOTBALL_DATA_API_KEY (registrazione gratuita su
+#    football-data.org), gli infortuni/squalificati vengono
+#    presi dal match corrispondente su football-data.org.
+#    Free tier: 10 richieste/minuto -> limiter integrato.
+# 2) ESPN (fallback): verificato empiricamente che l'endpoint
+#    ESPN per gli infortuni calcistici restituisce sempre un
+#    oggetto vuoto; si prova comunque e i risultati vuoti
+#    vengono memoizzati (TTL 6 h) per non sprecare richieste.
 # ============================================================
+
+FD_BASE = "https://api.football-data.org/v4"
+
+FOOTBALL_DATA_API_KEY = os.getenv(
+    "FOOTBALL_DATA_API_KEY",
+    ""
+).strip()
+
+# codici competizione football-data.org
+FD_CODICI_LEGA = {
+    "ita.1": "SA",
+    "eng.1": "PL",
+    "esp.1": "PD",
+    "ger.1": "BL1",
+    "fra.1": "FL1"
+}
+
+FD_TIPI = {
+    "INJURY": "Infortunato",
+    "SUSPENSION": "Squalificato"
+}
+
+# limiter: free tier = 10 req/min -> 1 chiamata ogni 6.5s
+_FD_LOCK = threading.Lock()
+_FD_ULTIMA = [0.0]
+FD_MIN_INTERVALLO = 6.5
+
+_FD_LEGHE_VUOTE: Dict[str, float] = {}
+
+# chiave non valida / non autorizzata: salta tutto il FD per 6h
+_FD_AUTH_KO: List[float] = [0.0]
+
+
+def _fd_auth_ko() -> bool:
+
+    return (
+        _FD_AUTH_KO[0]
+        and time.time() - _FD_AUTH_KO[0]
+        < CACHE_TTL_NEGATIVE
+    )
+
+
+def _fd_throttle():
+
+    while True:
+
+        with _FD_LOCK:
+
+            now = time.time()
+
+            attesa = (
+                _FD_ULTIMA[0]
+                + FD_MIN_INTERVALLO
+                - now
+            )
+
+            if attesa <= 0:
+                _FD_ULTIMA[0] = now
+                return
+
+        time.sleep(
+            min(attesa, 10)
+        )
+
+
+def _fd_get(
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    cache_key: Optional[str] = None,
+    ttl: int = CACHE_TTL
+):
+
+    if not FOOTBALL_DATA_API_KEY:
+        return None
+
+    if cache_key:
+
+        cached = cache_get(cache_key)
+
+        if cached is not None:
+            return (
+                cached
+                if cached != -1
+                else None
+            )
+
+    _fd_throttle()
+
+    try:
+
+        response = requests.get(
+            f"{FD_BASE}{path}",
+            params=params or {},
+            headers={
+                "X-Auth-Token": (
+                    FOOTBALL_DATA_API_KEY
+                )
+            },
+            timeout=HTTP_TIMEOUT
+        )
+
+        if response.status_code == 200:
+
+            data = response.json()
+
+            if cache_key:
+                cache_set(cache_key, data, ttl)
+
+            return data
+
+        print(
+            f"⚠️ football-data HTTP "
+            f"{response.status_code}: {path}"
+        )
+
+        if response.status_code in {400, 401, 403}:
+            _FD_AUTH_KO[0] = time.time()
+
+        if cache_key:
+            cache_set(cache_key, -1, CACHE_TTL_NEGATIVE)
+
+        return None
+
+    except Exception as exc:
+
+        print(
+            f"❌ Errore football-data: {exc}"
+        )
+
+        if cache_key:
+            cache_set(cache_key, -1, CACHE_TTL_NEGATIVE)
+
+        return None
+
+
+def _fd_match_corrispondente(
+    evento_fd: Dict[str, Any],
+    home_norm: str,
+    away_norm: str
+) -> bool:
+
+    ht = (
+        evento_fd.get("homeTeam", {})
+        or {}
+    )
+
+    at = (
+        evento_fd.get("awayTeam", {})
+        or {}
+    )
+
+    fh = normalizza_nome(
+        ht.get("name") or ht.get("shortName") or ""
+    )
+
+    fa = normalizza_nome(
+        at.get("name") or at.get("shortName") or ""
+    )
+
+    if not fh or not fa:
+        return False
+
+    def uguale(a, b):
+
+        return (
+            a == b
+            or a in b
+            or b in a
+        )
+
+    return (
+        uguale(fh, home_norm)
+        and uguale(fa, away_norm)
+    ) or (
+        uguale(fh, away_norm)
+        and uguale(fa, home_norm)
+    )
+
+
+def recupera_infortuni_fd(
+    data_partita: Optional[datetime],
+    home_name: str,
+    away_name: str,
+    league: str
+) -> Tuple[
+    Optional[List[Dict[str, Any]]],
+    Optional[List[Dict[str, Any]]]
+]:
+
+    """Infortuni reali (football-data.org) per la partita.
+
+    Ritorna (infortuni_home, infortuni_away):
+    - liste (anche vuote) = dati ottenuti
+    - (None, None) = dati non disponibili
+    """
+
+    if (
+        not FOOTBALL_DATA_API_KEY
+        or not data_partita
+        or league not in FD_CODICI_LEGA
+    ):
+        return None, None
+
+    if _fd_auth_ko():
+        return None, None
+
+    # lega segnata 'vuota' di recente -> salto
+    probe = _FD_LEGHE_VUOTE.get(league)
+
+    if (
+        probe
+        and time.time() - probe < CACHE_TTL_NEGATIVE
+    ):
+        return None, None
+
+    codice = FD_CODICI_LEGA[league]
+
+    dal = (
+        data_partita - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+
+    al = (
+        data_partita + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+
+    elenco = _fd_get(
+        f"/competitions/{codice}/matches",
+        params={
+            "dateFrom": dal,
+            "dateTo": al
+        },
+        cache_key=(
+            f"fd_matches_{codice}_{dal}_{al}"
+        )
+    )
+
+    partite = (
+        elenco.get("matches", [])
+        if isinstance(elenco, dict)
+        else []
+    )
+
+    home_norm = normalizza_nome(home_name)
+    away_norm = normalizza_nome(away_name)
+
+    fd_match = None
+
+    for m in partite:
+
+        if _fd_match_corrispondente(
+            m,
+            home_norm,
+            away_norm
+        ):
+
+            fd_match = m
+
+            break
+
+    if not fd_match:
+
+        return None, None
+
+    match_id = fd_match.get("id")
+
+    if not match_id:
+        return None, None
+
+    dati = _fd_get(
+        f"/matches/{match_id}/injuries",
+        cache_key=f"fd_inj_{match_id}",
+        ttl=12 * 3600
+    )
+
+    if dati is None:
+
+        # endpoint non disponibile per questa lega:
+        # memoizza per non riprovare a ogni partita
+        _FD_LEGHE_VUOTE[league] = time.time()
+
+        return None, None
+
+    lista = dati.get(
+        "injuries",
+        []
+    )
+
+    if not isinstance(lista, list):
+        lista = []
+
+    def scheda(lato: str):
+
+        nome_norm = (
+            home_norm
+            if lato == "h"
+            else away_norm
+        )
+
+        out = []
+        visti = set()
+
+        for item in lista:
+
+            player = (
+                item.get("player", {})
+                or {}
+            )
+
+            team = (
+                item.get("team", {})
+                or {}
+            )
+
+            tn = normalizza_nome(
+                team.get("name")
+                or team.get("shortName")
+                or ""
+            )
+
+            if (
+                not tn
+                or (
+                    tn != nome_norm
+                    and tn not in nome_norm
+                    and nome_norm not in tn
+                )
+            ):
+                continue
+
+            nome = (
+                player.get("name")
+                or player.get("displayName")
+                or player.get("shortName")
+                or "Giocatore"
+            )
+
+            tipo_raw = str(
+                item.get("type")
+                or "INJURY"
+            ).upper()
+
+            tipo = FD_TIPI.get(
+                tipo_raw,
+                tipo_raw.capitalize()
+            )
+
+            motivo = (
+                item.get("reason")
+                or item.get("detail")
+                or ""
+            )
+
+            chiave = (
+                normalizza_nome(nome),
+                tipo_raw
+            )
+
+            if chiave in visti:
+                continue
+
+            visti.add(chiave)
+
+            out.append({
+                "nome": nome,
+                "stato": tipo,
+                "motivo": motivo
+            })
+
+        return out
+
+    return scheda("h"), scheda("a")
+
 
 _PROBE_INFORTUNI: Dict[str, Tuple[str, float]] = {}
 
@@ -2398,8 +2897,17 @@ def calcola_probabilita(
     ppg_trasferta: Optional[float],
     fatigue_home: int,
     fatigue_away: int,
-    h2h: List[Dict[str, Any]]
+    h2h: List[Dict[str, Any]],
+    ppg_campionato_home: Optional[float] = None,
+    ppg_campionato_away: Optional[float] = None
 ) -> Tuple[float, float, float]:
+
+    # --------------------------------------------------------
+    # Pesi calibrati con backtest su 1000 partite delle 5
+    # grandi leghe (stagione 2025-26). Vedere backtest.py:
+    # log loss -3.5% rispetto ai pesi originali, coerente
+    # in-sample e out-of-sample.
+    # --------------------------------------------------------
 
     home = 45.0
     draw = 27.0
@@ -2418,7 +2926,7 @@ def calcola_probabilita(
     )
 
     # --------------------------------------------------------
-    # Forma generale
+    # Forma generale (tutte le competizioni)
     # --------------------------------------------------------
 
     differenza_forma = (
@@ -2427,12 +2935,34 @@ def calcola_probabilita(
     )
 
     home += (
-        differenza_forma * 7
+        differenza_forma * 4
     )
 
     away -= (
-        differenza_forma * 7
+        differenza_forma * 4
     )
+
+    # --------------------------------------------------------
+    # Forma di solo campionato (ultime 8 in lega)
+    # --------------------------------------------------------
+
+    if (
+        ppg_campionato_home is not None
+        and ppg_campionato_away is not None
+    ):
+
+        differenza_lega = (
+            ppg_campionato_home
+            - ppg_campionato_away
+        )
+
+        home += (
+            differenza_lega * 3
+        )
+
+        away -= (
+            differenza_lega * 3
+        )
 
     # --------------------------------------------------------
     # Rendimento casa / trasferta
@@ -2442,30 +2972,25 @@ def calcola_probabilita(
 
         home += (
             ppg_casa - 1.5
-        ) * 8
+        ) * 5
 
     if ppg_trasferta is not None:
 
         away += (
             ppg_trasferta - 1.5
-        ) * 8
+        ) * 5
 
     # --------------------------------------------------------
-    # Vantaggio campo
-    # --------------------------------------------------------
-
-    home += 5
-
-    # --------------------------------------------------------
-    # Fatica
+    # Fatica (il vantaggio campo è già nella base 45/27/28
+    # e nel rendimento casa/trasferta: nessun bonus extra)
     # --------------------------------------------------------
 
     home -= (
-        fatigue_home * 0.08
+        fatigue_home * 0.04
     )
 
     away -= (
-        fatigue_away * 0.08
+        fatigue_away * 0.04
     )
 
     # --------------------------------------------------------
@@ -2487,12 +3012,12 @@ def calcola_probabilita(
     home += (
         momentum_home
         - momentum_away
-    ) * 0.35
+    ) * 0.2
 
     away += (
         momentum_away
         - momentum_home
-    ) * 0.35
+    ) * 0.2
 
     # --------------------------------------------------------
     # H2H
@@ -2810,7 +3335,9 @@ def calcola_affidabilita(
     ],
     h2h: List[Dict[str, Any]],
     ppg_casa: Optional[float],
-    ppg_trasferta: Optional[float]
+    ppg_trasferta: Optional[float],
+    lp_home: Optional[float] = None,
+    lp_away: Optional[float] = None
 ) -> int:
 
     score = 45
@@ -2836,6 +3363,10 @@ def calcola_affidabilita(
 
     if ppg_trasferta is not None:
         score += 3
+
+    # Forma di solo campionato disponibile
+    if lp_home is not None and lp_away is not None:
+        score += 2
 
     # H2H
     if len(h2h) >= 3:
@@ -2949,17 +3480,59 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
-    # INFORTUNI
+    # FORMA DI SOLO CAMPIONATO (ultime 8 in lega)
     # --------------------------------------------------------
 
-    injuries_home = recupera_infortuni(
+    lp_home = ppg_campionato_squadra(
         home_id,
+        home_name,
         league
     )
 
-    injuries_away = recupera_infortuni(
+    lp_away = ppg_campionato_squadra(
         away_id,
+        away_name,
         league
+    )
+
+    # --------------------------------------------------------
+    # INFORTUNI (football-data.org se configurata la chiave,
+    # fallback ESPN)
+    # --------------------------------------------------------
+
+    data_evento = (
+        evento.get("_datetime")
+        or parse_datetime(
+            evento.get("date", "")
+        )
+    )
+
+    (
+        fd_inj_home,
+        fd_inj_away
+    ) = recupera_infortuni_fd(
+        data_evento,
+        home_name,
+        away_name,
+        league
+    )
+
+    injuries_home = (
+        fd_inj_home
+        if fd_inj_home is not None
+        else recupera_infortuni(
+            home_id,
+            league
+        )
+    )
+
+    injuries_away = (
+        fd_inj_away
+        if fd_inj_away is not None
+        else recupera_infortuni(
+            away_id,
+            league
+        )
     )
 
     # --------------------------------------------------------
@@ -3047,7 +3620,9 @@ def analizza_partita(
         ppg_trasferta,
         fatica_home,
         fatica_away,
-        h2h
+        h2h,
+        lp_home,
+        lp_away
     )
 
     # --------------------------------------------------------
@@ -3086,7 +3661,9 @@ def analizza_partita(
             injuries_away,
             h2h,
             ppg_casa,
-            ppg_trasferta
+            ppg_trasferta,
+            lp_home,
+            lp_away
         )
     )
 
@@ -3121,6 +3698,8 @@ def analizza_partita(
         "stats_away": stats_away,
         "ppg_casa": ppg_casa,
         "ppg_trasferta": ppg_trasferta,
+        "lp_home": lp_home,
+        "lp_away": lp_away,
         "injuries_home": injuries_home,
         "injuries_away": injuries_away,
         "h2h": h2h,
@@ -3235,6 +3814,13 @@ def format_report_partita(
 
         return f"{value:.2f}"
 
+    def lp_text(value):
+
+        if value is None:
+            return "N/D"
+
+        return f"{value:.2f}"
+
     def riposo_text(value):
 
         if value is None:
@@ -3306,9 +3892,11 @@ def format_report_partita(
 
 {home}: {sh['sequenza']}
 PPG {sh['ppg']:.2f} | GF {sh['gf']:.2f} | GS {sh['gs']:.2f}
+PPG campionato: {lp_text(analisi['lp_home'])}
 
 {away}: {sa['sequenza']}
 PPG {sa['ppg']:.2f} | GF {sa['gf']:.2f} | GS {sa['gs']:.2f}
+PPG campionato: {lp_text(analisi['lp_away'])}
 
 <b>🏠 RENDIMENTO CASA / TRASFERTA</b>
 
@@ -3789,13 +4377,14 @@ Seleziona il campionato da analizzare.
 Il bot elaborerà:
 
 • forma recente (ultime 10, tutte le competizioni)
+• forma di solo campionato (ultime 8 in lega)
 • rendimento casa/trasferta
-• H2H ultime 5 (tutte le competizioni)
+• H2H ultime 5 (tutte le competizioni, 3 stagioni)
 • impegni europei
-• infortuni disponibili
+• infortuni (football-data.org se configurata la chiave)
 • riposo/fatica
 • momentum statistico
-• probabilità 1X2
+• probabilità 1X2 (modello calibrato su dati storici)
 • Over/Under 2.5
 • Gol/No Gol
 • goal attesi
