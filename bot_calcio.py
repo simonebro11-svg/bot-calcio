@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import itertools
 import math
 import signal
 import queue
@@ -72,6 +73,10 @@ TERMINAZIONE_MIN_ORE = 4
 
 # Concorrenza analisi massime simultanee
 ANALISI_MAX_SIMULTANEE = 2
+
+# Payout per la stima delle quote (94% = margine medio bookmaker):
+# quota_stimata = 0.94 * 100 / probabilita
+QUOTA_PAYOUT = 0.94
 
 MODALITA = "avvio"
 
@@ -4306,6 +4311,648 @@ def invia_report(
     )
 
 
+
+# ============================================================
+# SCHEDINE
+#
+# Tre schedine pronte costruite sulle partite con affidabilità
+# più alta di TUTTI i campionati in elenco:
+#   🎟 SICURA      quota totale ≤ 10 (2-3 eventi)
+#   ⚡ EQUILIBRATA quota totale ≤ 25 (2-4 eventi)
+#   🔥 AUDACE      quota totale ≤ 50 (3-6 eventi)
+# Per ogni partita si sceglie il mercato con probabilità più
+# alta; la quota è stimata con payout 94%. Le combinazioni
+# vengono scelte massimizzando la probabilità complessiva
+# entro la fascia di quota.
+# ============================================================
+
+try:
+    from zoneinfo import ZoneInfo
+
+    TZ_ROMA = ZoneInfo(
+        "Europe/Rome"
+    )
+
+except Exception:
+
+    TZ_ROMA = timezone(
+        timedelta(hours=1)
+    )
+
+GIORNI_SETTIMANA = [
+    "lun",
+    "mar",
+    "mer",
+    "gio",
+    "ven",
+    "sab",
+    "dom"
+]
+
+
+def quota_stimata(
+    probabilita: float
+) -> float:
+
+    prob = clamp(
+        safe_float(probabilita),
+        1.0,
+        99.0
+    )
+
+    return max(
+        1.01,
+        round(
+            QUOTA_PAYOUT
+            * 100.0
+            / prob,
+            2
+        )
+    )
+
+
+def data_ora_italiana(
+    dt: Optional[datetime]
+) -> str:
+
+    if not dt:
+        return "data N/D"
+
+    try:
+
+        locale = dt.astimezone(
+            TZ_ROMA
+        )
+
+    except Exception:
+        locale = dt
+
+    giorno = GIORNI_SETTIMANA[
+        locale.weekday()
+    ]
+
+    return (
+        f"{giorno} "
+        f"{locale.strftime('%d/%m %H:%M')}"
+    )
+
+
+def migliore_pick(
+    analisi: Dict[str, Any]
+) -> Dict[str, Any]:
+
+    mercati = {
+        "1": analisi["prob_home"],
+        "X": analisi["prob_draw"],
+        "2": analisi["prob_away"],
+        "Over 2.5": analisi["over25"],
+        "Under 2.5": analisi["under25"],
+        "Gol": analisi["gol"],
+        "No Gol": analisi["no_gol"]
+    }
+
+    mercato = max(
+        mercati,
+        key=mercati.get
+    )
+
+    prob = safe_float(
+        mercati[mercato],
+        1.0
+    )
+
+    return {
+        "analisi": analisi,
+        "mercato": mercato,
+        "prob": clamp(
+            prob,
+            1.0,
+            99.0
+        ),
+        "quota": quota_stimata(
+            prob
+        ),
+        "aff": safe_int(
+            analisi.get(
+                "affidabilita"
+            )
+        )
+    }
+
+
+def migliori_pick(
+    analisi: Dict[str, Any],
+    max_pick: int = 2
+) -> List[Dict[str, Any]]:
+
+    """Fino a max_pick mercati giocabili per la partita
+    (il piu' probabile per primo). Piu' varianti per
+    partita = piu' quote disponibili per riempire le
+    fasce delle schedine. Ogni pick porta il match_key
+    per vietare due eventi della stessa partita in una
+    sola schedina.
+    """
+
+    mercati = {
+        "1": analisi["prob_home"],
+        "X": analisi["prob_draw"],
+        "2": analisi["prob_away"],
+        "Over 2.5": analisi["over25"],
+        "Under 2.5": analisi["under25"],
+        "Gol": analisi["gol"],
+        "No Gol": analisi["no_gol"]
+    }
+
+    ordine = sorted(
+        mercati.items(),
+        key=lambda kv: kv[1],
+        reverse=True
+    )[:max(1, max_pick)]
+
+    match_key = str(
+        analisi.get("evento", {}).get("id", "")
+    ) or (
+        f"{analisi.get('home','')}#"
+        f"{analisi.get('away','')}#"
+        f"{analisi.get('evento', {}).get('date','')}"
+    )
+
+    picks = []
+
+    for mercato, prob in ordine:
+
+        prob = clamp(
+            safe_float(prob, 1.0),
+            1.0,
+            99.0
+        )
+
+        picks.append({
+            "analisi": analisi,
+            "mercato": mercato,
+            "prob": prob,
+            "quota": quota_stimata(prob),
+            "aff": safe_int(
+                analisi.get("affidabilita")
+            ),
+            "match_key": match_key
+        })
+
+    return picks
+
+
+TIERS_SCHEDINE = [
+    {
+        "nome": "🎟 SCHEDINA SICURA",
+        "cap": 10.0,
+        "min_legs": 2,
+        "max_legs": 3,
+        "floor": 2.5,
+        "candidati": 24,
+        "prob_min": 0.40
+    },
+    {
+        "nome": "⚡ SCHEDINA EQUILIBRATA",
+        "cap": 25.0,
+        "min_legs": 2,
+        "max_legs": 4,
+        "floor": 8.0,
+        "candidati": 24,
+        "prob_min": 0.40
+    },
+    {
+        "nome": "🔥 SCHEDINA AUDACE",
+        "cap": 50.0,
+        "min_legs": 3,
+        "max_legs": 6,
+        "floor": 25.0,
+        "candidati": 24,
+        "prob_min": 0.35
+    }
+]
+
+
+def costruisci_schedina(
+    tier: Dict[str, Any],
+    picks_ordinate: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+
+    candidati = [
+        p for p in picks_ordinate
+        if p["prob"] / 100.0
+        >= tier["prob_min"]
+    ][:tier["candidati"]]
+
+    # fasce di quota: prima quella target, poi
+    # allargate (0.6x, poi qualsiasi quota sotto cap)
+    fasce = [
+        tier["floor"],
+        tier["floor"] * 0.6,
+        0.0
+    ]
+
+    best = None
+    best_key = None
+
+    for floor in fasce:
+
+        for size in range(
+            tier["min_legs"],
+            tier["max_legs"] + 1
+        ):
+
+            if size > len(candidati):
+                break
+
+            for combo in itertools.combinations(
+                candidati,
+                size
+            ):
+
+                # mai due eventi della stessa partita
+                chiavi = {
+                    p["match_key"]
+                    for p in combo
+                }
+
+                if len(chiavi) != size:
+                    continue
+
+                quota_tot = 1.0
+                score = 0.0
+
+                for p in combo:
+
+                    quota_tot *= p[
+                        "quota"
+                    ]
+
+                    score += math.log(
+                        p["prob"]
+                        / 100.0
+                    )
+
+                if quota_tot > tier["cap"]:
+                    continue
+
+                in_range = (
+                    quota_tot >= floor
+                )
+
+                key = (
+                    in_range,
+                    score
+                )
+
+                if (
+                    best_key is None
+                    or key > best_key
+                ):
+
+                    best_key = key
+                    best = (
+                        combo,
+                        quota_tot
+                    )
+
+        if best and best_key[0]:
+            break
+
+    if not best:
+        return None
+
+    combo, quota_tot = best
+
+    aff_media = sum(
+        p["aff"] for p in combo
+    ) / len(combo)
+
+    prob_combinata = (
+        100.0
+        * math.prod(
+            p["prob"] / 100.0
+            for p in combo
+        )
+    )
+
+    return {
+        "tier": tier,
+        "legs": list(combo),
+        "quota_tot": round(
+            quota_tot,
+            2
+        ),
+        "aff_media": round(
+            aff_media
+        ),
+        "prob_combinata": round(
+            prob_combinata,
+            1
+        )
+    }
+
+
+def format_schedina(
+    schedina: Dict[str, Any]
+) -> str:
+
+    tier = schedina["tier"]
+
+    righe = [
+        f"<b>{tier['nome']}</b>",
+        (
+            f"Quota massima: "
+            f"{tier['cap']:.0f}"
+        ),
+        "",
+        (
+            f"<b>Quota totale stimata: "
+            f"{schedina['quota_tot']:.2f}</b>"
+        ),
+        (
+            f"Probabilità complessiva: "
+            f"~{schedina['prob_combinata']:.1f}%"
+        ),
+        (
+            f"Affidabilità media dati: "
+            f"{schedina['aff_media']}%"
+        ),
+        "",
+        "<b>EVENTI</b>"
+    ]
+
+    for numero, leg in enumerate(
+        schedina["legs"],
+        start=1
+    ):
+
+        analisi = leg["analisi"]
+
+        home = html_safe(
+            analisi["home"]
+        )
+
+        away = html_safe(
+            analisi["away"]
+        )
+
+        lega = html_safe(
+            CAMPIONATI.get(
+                campionato_da_espn(
+                    analisi.get(
+                        "league",
+                        ""
+                    )
+                ),
+                {}
+            ).get(
+                "nome",
+                ""
+            )
+        )
+
+        dt = (
+            analisi["evento"].get(
+                "_datetime"
+            )
+            or parse_datetime(
+                analisi["evento"].get(
+                    "date",
+                    ""
+                )
+            )
+        )
+
+        righe.append(
+            ""
+        )
+
+        righe.append(
+            f"<b>{numero}. {home} - {away}</b>"
+        )
+
+        extra = []
+
+        if lega:
+            extra.append(lega)
+
+        quando = data_ora_italiana(
+            dt
+        )
+
+        if quando != "data N/D":
+            extra.append(quando)
+
+        if extra:
+            righe.append(
+                " | ".join(extra)
+            )
+
+        righe.append(
+            f"Pronostico: "
+            f"<b>{html_safe(leg['mercato'])}</b> "
+            f"({leg['prob']:.0f}%) "
+            f"— quota {leg['quota']:.2f} "
+            f"| affidabilità {leg['aff']}%"
+        )
+
+    righe.append("")
+    righe.append(
+        "⚠️ <i>Quote stimate dal modello "
+        "(payout 94%), non quote di un "
+        "bookmaker. Le percentuali sono "
+        "stime statistiche e non garantiscono "
+        "alcun risultato. Gioca sempre in "
+        "modo responsabile.</i>"
+    )
+
+    return "\n".join(righe)
+
+
+def crea_schedine(
+    on_progress: Optional[Any] = None
+) -> Optional[List[str]]:
+
+    print()
+    print("=" * 50)
+    print("🎟 RICHIESTA SCHEDINE")
+    print("=" * 50)
+
+    pool = []
+
+    leghe = list(
+        CAMPIONATI.items()
+    )
+
+    totali = 0
+    fatti = 0
+
+    per_lega = []
+
+    for chiave, config in leghe:
+
+        league = config["espn"]
+
+        partite = (
+            recupera_partite_future(
+                league
+            )
+        )
+
+        per_lega.append(
+            (league, partite)
+        )
+
+        totali += len(partite)
+
+    if not totali:
+
+        print("❌ Nessuna partita trovata")
+
+        return None
+
+    for league, partite in per_lega:
+
+        nome = (
+            CAMPIONATI.get(
+                campionato_da_espn(
+                    league
+                ),
+                {}
+            ).get(
+                "nome",
+                league
+            )
+        )
+
+        for indice, evento in enumerate(
+            partite,
+            start=1
+        ):
+
+            try:
+
+                analisi = analizza_partita(
+                    evento,
+                    league,
+                    indice,
+                    len(partite)
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"❌ Errore analisi "
+                    f"partita: {exc}"
+                )
+
+                analisi = None
+
+            fatti += 1
+
+            if analisi:
+
+                analisi["league"] = league
+
+                pool.extend(
+                    migliori_pick(
+                        analisi,
+                        max_pick=2
+                    )
+                )
+
+            if on_progress:
+
+                on_progress(
+                    fatti,
+                    totali,
+                    nome,
+                    (
+                        analisi["home"]
+                        if analisi
+                        else "?"
+                    ),
+                    (
+                        analisi["away"]
+                        if analisi
+                        else "?"
+                    )
+                )
+
+    print(
+        f"🎟 Partite analizzate: "
+        f"{len(pool)}/{totali}"
+    )
+
+    if len(pool) < 2:
+
+        print(
+            "❌ Pool insufficiente "
+            "per le schedine"
+        )
+
+        return None
+
+    picks_ordinate = sorted(
+        pool,
+        key=lambda p: (
+            -p["aff"],
+            -p["quota"],
+            -p["prob"]
+        )
+    )
+
+    schedine = []
+
+    for tier in TIERS_SCHEDINE:
+
+        try:
+
+            s = costruisci_schedina(
+                tier,
+                picks_ordinate
+            )
+
+        except Exception as exc:
+
+            print(
+                f"❌ Errore costruzione "
+                f"schedina {tier['nome']}: "
+                f"{exc}"
+            )
+
+            s = None
+
+        if s:
+
+            schedine.append(s)
+
+            print(
+                f"   {tier['nome']}: "
+                f"{len(s['legs'])} eventi, "
+                f"quota {s['quota_tot']:.2f} "
+                f"(cap {tier['cap']:.0f}), "
+                f"aff {s['aff_media']}%"
+            )
+
+        else:
+
+            print(
+                f"   ⚠️ Nessuna combinazione "
+                f"per {tier['nome']}"
+            )
+
+    if not schedine:
+        return None
+
+    print("📨 Schedine create.")
+
+    return [
+        format_schedina(s)
+        for s in schedine
+    ]
+
+
 # ============================================================
 # MENU TELEGRAM
 # ============================================================
@@ -4334,6 +4981,21 @@ def crea_menu_campionati():
 
     markup.add(
         *pulsanti
+    )
+
+    markup.row(
+        types.InlineKeyboardButton(
+            "🎟 SICURA ≤10",
+            callback_data="schedina:10"
+        ),
+        types.InlineKeyboardButton(
+            "⚡ EQUILIBRATA ≤25",
+            callback_data="schedina:25"
+        ),
+        types.InlineKeyboardButton(
+            "🔥 AUDACE ≤50",
+            callback_data="schedina:50"
+        )
     )
 
     return markup
@@ -4389,6 +5051,7 @@ Il bot elaborerà:
 • Gol/No Gol
 • goal attesi
 • affidabilità dei dati
+• 🎟 schedine pronte: SICURA (quota fino a 10), EQUILIBRATA (fino a 25), AUDACE (fino a 50)
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
 """.strip()
@@ -4509,6 +5172,47 @@ def callback_campionato(call):
     avvia_analisi_chat(
         call.message.chat.id,
         league
+    )
+
+
+@bot.callback_query_handler(
+    func=lambda call:
+    (
+        call.data
+        and call.data.startswith(
+            "schedina:"
+        )
+    )
+)
+def callback_schedina(call):
+
+    if not call.message:
+
+        bot.answer_callback_query(
+            call.id,
+            "Premi /start per riavviare il menu."
+        )
+
+        return
+
+    try:
+        cap = float(
+            call.data.split(
+                ":",
+                1
+            )[1]
+        )
+    except Exception:
+        cap = 10.0
+
+    bot.answer_callback_query(
+        call.id,
+        "🎟 Preparo le schedine..."
+    )
+
+    avvia_schedina_chat(
+        call.message.chat.id,
+        cap
     )
 
 
@@ -4722,6 +5426,215 @@ def avvia_analisi_chat(
                     f"❌ Errore invio errore "
                     f"Telegram: {exc2}"
                 )
+
+        finally:
+
+            with _CHAT_LOCK:
+                _CHAT_IN_ANALISI.discard(
+                    chat_id
+                )
+
+    threading.Thread(
+        target=lavoro,
+        daemon=True
+    ).start()
+
+
+def avvia_schedina_chat(
+    chat_id: int,
+    cap: float
+):
+
+    with _CHAT_LOCK:
+
+        if chat_id in _CHAT_IN_ANALISI:
+
+            try:
+                bot.send_message(
+                    chat_id,
+                    (
+                        "⏳ Un'analisi è già in "
+                        "corso per questa chat.\n"
+                        "Attendi il completamento."
+                    )
+                )
+            except Exception:
+                pass
+
+            return
+
+        _CHAT_IN_ANALISI.add(
+            chat_id
+        )
+
+    def lavoro():
+
+        try:
+
+            _SEMAFORO_ANALISI.acquire()
+
+            try:
+
+                print(
+                    f"🚀 Avvio schedine: cap {cap}"
+                )
+
+                status_id = None
+
+                try:
+                    msg = bot.send_message(
+                        chat_id,
+                        (
+                            "🎟 <b>Preparazione "
+                            "schedine in corso...</b>\n\n"
+                            "Analizzo tutti i 5 "
+                            "campionati per scegliere "
+                            "le partite più affidabili.\n"
+                            "🔎 0/"
+                        )
+                    )
+                    status_id = msg.message_id
+                except Exception as exc:
+                    print(
+                        f"⚠️ Messaggio iniziale: {exc}"
+                    )
+
+                def progresso(
+                    fatti: int,
+                    totali: int,
+                    lega: str,
+                    home: str,
+                    away: str
+                ):
+
+                    if not status_id:
+                        return
+
+                    try:
+                        bot.edit_message_text(
+                            (
+                                "🎟 <b>Preparazione "
+                                "schedine in corso...</b>\n\n"
+                                f"✅ {fatti}/{totali} partite "
+                                "analizzate sui 5 campionati\n"
+                                f"🏟 {html_safe(lega)}: "
+                                f"{html_safe(home)} - "
+                                f"{html_safe(away)}"
+                            ),
+                            chat_id=chat_id,
+                            message_id=status_id
+                        )
+                    except Exception as exc:
+                        print(
+                            f"⚠️ Edit progresso: {exc}"
+                        )
+
+                testi = crea_schedine(
+                    on_progress=progresso
+                )
+
+                if not testi:
+
+                    testo_errore = (
+                        "❌ Non sono riuscito a "
+                        "creare le schedine.\n"
+                        "Riprova più tardi."
+                    )
+
+                    if status_id:
+                        try:
+                            bot.edit_message_text(
+                                testo_errore,
+                                chat_id=chat_id,
+                                message_id=status_id
+                            )
+                        except Exception:
+                            pass
+
+                    else:
+                        try:
+                            bot.send_message(
+                                chat_id,
+                                testo_errore
+                            )
+                        except Exception:
+                            pass
+
+                    return
+
+                if status_id:
+                    try:
+                        bot.edit_message_text(
+                            (
+                                "✅ Analisi completate.\n"
+                                "🎟 Invio delle 3 schedine..."
+                            ),
+                            chat_id=chat_id,
+                            message_id=status_id
+                        )
+                    except Exception:
+                        pass
+
+                for testo in testi:
+
+                    try:
+
+                        bot.send_message(
+                            chat_id,
+                            testo,
+                            disable_web_page_preview=True
+                        )
+
+                    except Exception as exc:
+
+                        print(
+                            f"❌ Invio schedina: {exc}"
+                        )
+
+                        try:
+
+                            bot.send_message(
+                                chat_id,
+                                re.sub(
+                                    r"<[^>]+>",
+                                    "",
+                                    testo
+                                ),
+                                parse_mode=None,
+                                disable_web_page_preview=True
+                            )
+
+                        except Exception as exc2:
+
+                            print(
+                                f"❌ Fallback schedina: {exc2}"
+                            )
+
+                print(
+                    "✅ SCHEDINE INVIATE."
+                )
+
+            finally:
+
+                _SEMAFORO_ANALISI.release()
+
+        except Exception as exc:
+
+            print(
+                f"❌ ERRORE SCHEDINE: {exc}"
+            )
+
+            try:
+                bot.send_message(
+                    chat_id,
+                    (
+                        "❌ Si è verificato un errore "
+                        "durante la creazione delle "
+                        "schedine.\nControlla i log."
+                    )
+                )
+            except Exception:
+                pass
 
         finally:
 
