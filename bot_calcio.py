@@ -85,6 +85,27 @@ ANALISI_MAX_SIMULTANEE = 2
 # quota_stimata = 0.94 * 100 / probabilita
 QUOTA_PAYOUT = 0.94
 
+# --------------------------------------------------------
+# CALIBRAZIONE MERCATI (backtest su 1000 partite delle 5
+# grandi leghe, stagione 2025-26: vedere backtest.py,
+# sezione calibrazione_mercati).
+#
+# Frequenze reali: Over2.5=52.9%, Gol/BTTS=52.6%,
+# 1X2=(45/23/31). I mercati goal del modello sono
+# SOVRAFFIDATI: lo shrinkage p_cal = w*p + (1-w)*base
+# li riporta a probabilita' oneste (log loss: Over
+# 0.703->0.688, Gol 0.795->0.692 circa, 1X2 -0.5%).
+# --------------------------------------------------------
+
+CAL_BASE_OVER25 = 52.9
+CAL_W_OVER25 = 0.35
+
+CAL_BASE_GOL = 52.6
+CAL_W_GOL = 0.15
+
+CAL_BASE_1X2 = (45.0, 23.0, 31.0)
+CAL_W_1X2 = 0.75
+
 MODALITA = "avvio"
 
 
@@ -851,7 +872,7 @@ def recupera_partite_future(
 ) -> List[Dict[str, Any]]:
 
     print(
-        f"📅 Recupero partite future: "
+        f"\U0001f4c5 Recupero partite future: "
         f"{campionato}"
     )
 
@@ -866,7 +887,7 @@ def recupera_partite_future(
     if cached is not None:
 
         print(
-            f"📦 Uso cache: "
+            f"\U0001f4e6 Uso cache: "
             f"{len(cached)} partite"
         )
 
@@ -874,22 +895,6 @@ def recupera_partite_future(
 
     oggi = datetime.now(
         timezone.utc
-    )
-
-    date = [
-        (
-            oggi
-            + timedelta(days=i)
-        ).strftime("%Y%m%d")
-        for i in range(GIORNI_FUTURI)
-    ]
-
-    print(
-        f"🔎 Ricerca ESPN da "
-        f"{oggi.strftime('%Y-%m-%d %H:%M UTC')} "
-        f"per i prossimi "
-        f"{GIORNI_FUTURI} giorni "
-        f"({len(date)} richieste parallele)"
     )
 
     def _fetch(data_str: str):
@@ -906,94 +911,132 @@ def recupera_partite_future(
             )
         )
 
-    with ThreadPoolExecutor(
-        max_workers=4
-    ) as executor:
+    def _scandici(num_giorni: int):
 
-        risposte = list(
-            executor.map(
-                _fetch,
-                date
+        """Scansiona i prossimi num_giorni giorni
+        (richieste parallele, cache per giorno) e
+        ritorna gli eventi futuri ordinati per data."""
+
+        date = [
+            (
+                oggi
+                + timedelta(days=i)
+            ).strftime("%Y%m%d")
+            for i in range(num_giorni)
+        ]
+
+        with ThreadPoolExecutor(
+            max_workers=6
+        ) as executor:
+
+            risposte = list(
+                executor.map(
+                    _fetch,
+                    date
+                )
+            )
+
+        eventi = []
+        ids_visti = set()
+
+        for data in risposte:
+
+            if not data:
+                continue
+
+            for evento in (
+                data.get("events", [])
+            ):
+
+                event_id = str(
+                    evento.get(
+                        "id",
+                        ""
+                    )
+                ).strip()
+
+                if not event_id:
+                    continue
+
+                if event_id in ids_visti:
+                    continue
+
+                dt = parse_datetime(
+                    evento.get(
+                        "date",
+                        ""
+                    )
+                )
+
+                if not dt:
+                    continue
+
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+
+                if dt <= oggi:
+                    continue
+
+                home, away = (
+                    estrai_competitors(
+                        evento
+                    )
+                )
+
+                if not home or not away:
+                    continue
+
+                ids_visti.add(event_id)
+
+                evento["_datetime"] = dt
+
+                eventi.append(evento)
+
+        eventi.sort(
+            key=lambda x:
+            x.get("_datetime")
+            or datetime.max.replace(
+                tzinfo=timezone.utc
             )
         )
 
+        return eventi
+
+    # Finestra adattiva: durante le pause di calendario
+    # (raduni nazionali, esono pernottamenti) nei primi
+    # 14 giorni puo' non esserci nulla: si allarga la
+    # ricerca fino a 42 giorni con arresto anticipato.
     eventi = []
-    ids_visti = set()
+    finestra_usata = GIORNI_FUTURI
 
-    for data in risposte:
+    for finestra in dict.fromkeys(
+        [
+            GIORNI_FUTURI,
+            GIORNI_FUTURI * 2,
+            GIORNI_FUTURI * 3
+        ]
+    ):
 
-        if not data:
-            continue
-
-        for evento in (
-            data.get("events", [])
-        ):
-
-            event_id = str(
-                evento.get(
-                    "id",
-                    ""
-                )
-            ).strip()
-
-            if not event_id:
-                continue
-
-            if event_id in ids_visti:
-                continue
-
-            dt = parse_datetime(
-                evento.get(
-                    "date",
-                    ""
-                )
-            )
-
-            if not dt:
-
-                print(
-                    f"   ⚠️ Data non leggibile "
-                    f"per evento {event_id}"
-                )
-
-                continue
-
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
-
-            if dt <= oggi:
-                continue
-
-            home, away = (
-                estrai_competitors(
-                    evento
-                )
-            )
-
-            if not home or not away:
-
-                print(
-                    f"   ⚠️ Squadre non trovate "
-                    f"per evento {event_id}"
-                )
-
-                continue
-
-            ids_visti.add(event_id)
-
-            evento["_datetime"] = dt
-
-            eventi.append(evento)
-
-    eventi.sort(
-        key=lambda x:
-        x.get("_datetime")
-        or datetime.max.replace(
-            tzinfo=timezone.utc
+        print(
+            f"\U0001f50e Ricerca ESPN: prossimi "
+            f"{finestra} giorni "
+            f"({finestra} richieste, cache per giorno)"
         )
-    )
+
+        eventi = _scandici(finestra)
+
+        finestra_usata = finestra
+
+        if len(eventi) >= NUM_PARTITE_REPORT:
+            break
+
+        if eventi and finestra == max(
+            GIORNI_FUTURI * 3,
+            GIORNI_FUTURI
+        ):
+            break
 
     risultati = eventi[
         :NUM_PARTITE_REPORT
@@ -1005,8 +1048,9 @@ def recupera_partite_future(
     )
 
     print(
-        f"📅 Partite future trovate: "
-        f"{len(risultati)}"
+        f"\U0001f4c5 Partite future trovate: "
+        f"{len(risultati)} "
+        f"(finestra {finestra_usata} gg)"
     )
 
     return risultati
@@ -2802,6 +2846,46 @@ def giorni_dall_ultima_partita(
     )
 
 
+def riposo_reale(
+    form: List[Dict[str, Any]],
+    data_evento: Optional[datetime]
+) -> Optional[float]:
+
+    """Giorni di riposo PRIMA della partita da pronosticare:
+    differenza tra la data dell'evento e l'ultima gara
+    giocata. (Prima si usava 'oggi': durante le pause di
+    calendario questo dava fatica fittizia al 100%.)"""
+
+    if not form:
+        return None
+
+    ultima = max(
+        (
+            x["date"]
+            for x in form
+            if x.get("date")
+        ),
+        default=None
+    )
+
+    if not ultima:
+        return None
+
+    if not data_evento:
+        data_evento = datetime.now(
+            timezone.utc
+        )
+
+    delta = (
+        data_evento - ultima
+    ).total_seconds() / 86400
+
+    return max(
+        0,
+        delta
+    )
+
+
 def indice_fatica(
     giorni: Optional[float]
 ) -> int:
@@ -3156,10 +3240,34 @@ def calcola_probabilita(
         + away
     )
 
+    # shrinkage di calibrazione verso la distribuzione
+    # empirica 1X2 (vedi CAL_*)
+    w = CAL_W_1X2
+    b1, bx, b2 = CAL_BASE_1X2
+
+    home_c = (
+        w * (home / totale * 100)
+        + (1 - w) * b1
+    )
+
+    draw_c = (
+        w * (draw / totale * 100)
+        + (1 - w) * bx
+    )
+
+    away_c = (
+        w * (away / totale * 100)
+        + (1 - w) * b2
+    )
+
+    tot_c = (
+        home_c + draw_c + away_c
+    )
+
     return (
-        home / totale * 100,
-        draw / totale * 100,
-        away / totale * 100
+        home_c / tot_c * 100,
+        draw_c / tot_c * 100,
+        away_c / tot_c * 100
     )
 
 
@@ -3274,10 +3382,19 @@ def probabilita_over_25(
             k
         )
 
-    return clamp(
+    over = clamp(
         (1 - under) * 100,
         0,
         100
+    )
+
+    # shrinkage di calibrazione (vedi CAL_*)
+    return clamp(
+        CAL_W_OVER25 * over
+        + (1 - CAL_W_OVER25)
+        * CAL_BASE_OVER25,
+        1,
+        99
     )
 
 
@@ -3325,10 +3442,15 @@ def probabilita_gol(
         + difesa * 20
     )
 
+    # il mercato Gol/BTTS del modello non ha skill
+    # oltre la frequenza base (verificato sul
+    # backtest): shrinkage forte verso la base
     return clamp(
-        indice,
-        10,
-        90
+        CAL_W_GOL * indice
+        + (1 - CAL_W_GOL)
+        * CAL_BASE_GOL,
+        1,
+        99
     )
 
 
@@ -3580,14 +3702,16 @@ def analizza_partita(
     # --------------------------------------------------------
 
     riposo_home = (
-        giorni_dall_ultima_partita(
-            form_home
+        riposo_reale(
+            form_home,
+            data_evento
         )
     )
 
     riposo_away = (
-        giorni_dall_ultima_partita(
-            form_away
+        riposo_reale(
+            form_away,
+            data_evento
         )
     )
 
@@ -4022,8 +4146,8 @@ def crea_report(
             f"⚠️ Non sono state trovate "
             f"partite future per "
             f"<b>{html_safe(nome_campionato)}</b> "
-            f"nei prossimi "
-            f"{GIORNI_FUTURI} giorni."
+            f"nei prossimi 42 giorni "
+            f"(possibile pausa di calendario)."
         )
 
     partite = partite[
@@ -4460,6 +4584,13 @@ def migliori_pick(
     sola schedina.
     """
 
+    tot_1x2 = max(
+        1.0,
+        analisi["prob_home"]
+        + analisi["prob_draw"]
+        + analisi["prob_away"]
+    )
+
     mercati = {
         "1": analisi["prob_home"],
         "X": analisi["prob_draw"],
@@ -4467,7 +4598,24 @@ def migliori_pick(
         "Over 2.5": analisi["over25"],
         "Under 2.5": analisi["under25"],
         "Gol": analisi["gol"],
-        "No Gol": analisi["no_gol"]
+        "No Gol": analisi["no_gol"],
+        # doppie chance (da 1X2 calibrato): gambe a
+        # probabilita' alta per le schedine prudenti
+        "Doppia 1X": (
+            (analisi["prob_home"]
+             + analisi["prob_draw"])
+            / tot_1x2 * 100
+        ),
+        "Doppia 12": (
+            (analisi["prob_home"]
+             + analisi["prob_away"])
+            / tot_1x2 * 100
+        ),
+        "Doppia X2": (
+            (analisi["prob_draw"]
+             + analisi["prob_away"])
+            / tot_1x2 * 100
+        )
     }
 
     ordine = sorted(
@@ -4514,27 +4662,29 @@ TIERS_SCHEDINE = [
         "cap": 10.0,
         "min_legs": 2,
         "max_legs": 3,
-        "floor": 2.5,
+        "floor": 1.5,
         "candidati": 24,
-        "prob_min": 0.40
+        "prob_min": 0.40,
+        "no_fatica": True
     },
     {
         "nome": "⚡ SCHEDINA EQUILIBRATA",
         "cap": 25.0,
         "min_legs": 2,
         "max_legs": 4,
-        "floor": 8.0,
+        "floor": 4.0,
         "candidati": 24,
-        "prob_min": 0.40
+        "prob_min": 0.40,
+        "no_fatica": True
     },
     {
         "nome": "🔥 SCHEDINA AUDACE",
         "cap": 50.0,
         "min_legs": 3,
         "max_legs": 6,
-        "floor": 25.0,
+        "floor": 15.0,
         "candidati": 24,
-        "prob_min": 0.35
+        "prob_min": 0.22
     }
 ]
 
@@ -4548,13 +4698,65 @@ def costruisci_schedina(
         p for p in picks_ordinate
         if p["prob"] / 100.0
         >= tier["prob_min"]
-    ][:tier["candidati"]]
+    ]
+
+    # squadre stanche (riposo < 3 giorni) fuori
+    # dalle schedine prudenti
+    if tier.get("no_fatica"):
+
+        candidati = [
+            p for p in candidati
+            if max(
+                safe_int(
+                    p["analisi"].get(
+                        "fatica_home"
+                    )
+                ),
+                safe_int(
+                    p["analisi"].get(
+                        "fatica_away"
+                    )
+                )
+            ) < 55
+        ]
+
+    # Selezione bilanciata: meta' delle gambe piu'
+    # PROBABILI (per non buttare fuori le doppie
+    # chance alte) + meta' delle gambe a QUOTA piu'
+    # alta (per raggiungere le fasce delle schedine
+    # alte come l'AUDACE).
+    per_prob = sorted(
+        candidati,
+        key=lambda p: -p["prob"]
+    )[:tier["candidati"] // 2]
+
+    per_quota = sorted(
+        candidati,
+        key=lambda p: -p["quota"]
+    )[:tier["candidati"] // 2]
+
+    visti_s = set()
+    candidati = []
+
+    for p in per_prob + per_quota:
+
+        k = (
+            p["match_key"],
+            p["mercato"]
+        )
+
+        if k in visti_s:
+            continue
+
+        visti_s.add(k)
+
+        candidati.append(p)
 
     # fasce di quota: prima quella target, poi
     # allargate (0.6x, poi qualsiasi quota sotto cap)
     fasce = [
         tier["floor"],
-        tier["floor"] * 0.6,
+        tier["floor"] * 0.5,
         0.0
     ]
 
@@ -4904,7 +5106,7 @@ def crea_schedine(
             pool.extend(
                 migliori_pick(
                     analisi,
-                    max_pick=2
+                    max_pick=6
                 )
             )
 
