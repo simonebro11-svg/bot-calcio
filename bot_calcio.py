@@ -201,6 +201,97 @@ COMPETIZIONI_EUROPEE = {
 # Slug senza valore statistico (non contano per forma/H2H)
 SLUG_INUTILI = {"club.friendly"}
 
+# ============================================================
+# SOTTOMENU (nazionali + coppe europee)
+#
+# Ogni sottomenu ha le sue competizioni e le STESSE 4 schedine
+# (SICURA/EQUILIBRATA/AUDACE/MITO) costruite SOLO sulle
+# partite delle competizioni del sottomenu (stessa logica
+# dell'ottimizzatore: fasce, prob_min, pool a 3 gruppi).
+# ============================================================
+
+SOTTOMENU = {
+    "naz": {
+        "titolo": "🌍 Nazionali",
+        "scope": "naz",
+        "competizioni": [
+            {
+                "espn": "uefa.nations",
+                "nome": "UEFA Nations League",
+                "btn": "🌍 Nations League"
+            },
+            {
+                "espn": "fifa.friendly",
+                "nome": "Amichevoli internazionali",
+                "btn": "🤝 Amichevoli"
+            }
+        ]
+    },
+    "europa": {
+        "titolo": "🏆 Champions & Europa",
+        "scope": "europa",
+        "competizioni": [
+            {
+                "espn": "uefa.champions",
+                "nome": "Champions League",
+                "btn": "⭐ Champions League"
+            },
+            {
+                "espn": "uefa.europa",
+                "nome": "Europa League",
+                "btn": "🥈 Europa League"
+            }
+        ]
+    }
+}
+
+
+def config_competizione(
+    key: str
+) -> Optional[Dict[str, Any]]:
+
+    """Config di una competizione: campionati club (per
+    chiave display) o competizioni dei sottomenu (per
+    slug ESPN). None se sconosciuta."""
+
+    if key in CAMPIONATI:
+        return CAMPIONATI[key]
+
+    for cat in SOTTOMENU.values():
+
+        for c in cat["competizioni"]:
+
+            if c["espn"] == key:
+
+                return {
+                    "espn": c["espn"],
+                    "nome": c["nome"]
+                }
+
+    return None
+
+
+def slug_per_scope(
+    scope: Optional[str]
+) -> Optional[List[str]]:
+
+    """Slug ESPN delle competizioni di un sottomenu
+    (None = pool club classico dei 5 campionati)."""
+
+    if not scope:
+        return None
+
+    for cat in SOTTOMENU.values():
+
+        if cat["scope"] == scope:
+
+            return [
+                c["espn"]
+                for c in cat["competizioni"]
+            ]
+
+    return None
+
 
 # ============================================================
 # CACHE (LRU con TTL, supporto risultati negativi)
@@ -5616,12 +5707,12 @@ def crea_report(
     ] = None
 ) -> Optional[str]:
 
-    if campionato_key not in CAMPIONATI:
-        return None
-
-    configurazione = CAMPIONATI[
+    configurazione = config_competizione(
         campionato_key
-    ]
+    )
+
+    if configurazione is None:
+        return None
 
     league = configurazione[
         "espn"
@@ -6646,7 +6737,8 @@ def format_schedina(
 
 def crea_schedine(
     cap: Optional[float] = None,
-    on_progress: Optional[Any] = None
+    on_progress: Optional[Any] = None,
+    slugs: Optional[List[str]] = None
 ) -> Optional[List[str]]:
 
     print()
@@ -6658,9 +6750,25 @@ def crea_schedine(
 
     pool = []
 
-    leghe = list(
-        CAMPIONATI.items()
-    )
+    if slugs:
+
+        leghe = [
+            (
+                slug,
+                config_competizione(slug)
+                or {
+                    "espn": slug,
+                    "nome": slug
+                }
+            )
+            for slug in slugs
+        ]
+
+    else:
+
+        leghe = list(
+            CAMPIONATI.items()
+        )
 
     totali = 0
     fatti = 0
@@ -6758,7 +6866,9 @@ def crea_schedine(
                 campionato_da_espn(
                     league
                 ),
-                {}
+                config_competizione(
+                    league
+                ) or {}
             ).get(
                 "nome",
                 league
@@ -7000,6 +7110,21 @@ def crea_menu_campionati():
 
     markup.row(
         types.InlineKeyboardButton(
+            "🌍 Nazionali",
+            callback_data=(
+                "sottomenu:naz"
+            )
+        ),
+        types.InlineKeyboardButton(
+            "🏆 CL & Europa",
+            callback_data=(
+                "sottomenu:europa"
+            )
+        )
+    )
+
+    markup.row(
+        types.InlineKeyboardButton(
             "🎟 SICURA ≤10",
             callback_data="schedina:10"
         ),
@@ -7035,6 +7160,77 @@ def campionato_da_espn(
             return key
 
     return None
+
+
+def crea_menu_sottomenu(
+    cat_key: str
+):
+
+    """Tastiera del sottomenu: le sue competizioni
+    (report singolo) + le 4 schedine sul pool di
+    TUTTE le competizioni del sottomenu."""
+
+    cat = SOTTOMENU.get(cat_key)
+
+    if not cat:
+        return None
+
+    markup = types.InlineKeyboardMarkup(
+        row_width=1
+    )
+
+    for c in cat["competizioni"]:
+
+        markup.add(
+            types.InlineKeyboardButton(
+                c["btn"],
+                callback_data=(
+                    "campionato:"
+                    + c["espn"]
+                )
+            )
+        )
+
+    scope = cat["scope"]
+
+    markup.row(
+        types.InlineKeyboardButton(
+            "🎟 SICURA ≤10",
+            callback_data=(
+                f"schedina:10:{scope}"
+            )
+        ),
+        types.InlineKeyboardButton(
+            "⚡ EQUILIBRATA ≤25",
+            callback_data=(
+                f"schedina:25:{scope}"
+            )
+        )
+    )
+
+    markup.row(
+        types.InlineKeyboardButton(
+            "🔥 AUDACE ≤50",
+            callback_data=(
+                f"schedina:50:{scope}"
+            )
+        ),
+        types.InlineKeyboardButton(
+            "💣 MITO 51-60",
+            callback_data=(
+                f"schedina:60:{scope}"
+            )
+        )
+    )
+
+    markup.row(
+        types.InlineKeyboardButton(
+            "⬅️ Menu campionati",
+            callback_data="menu:inizio"
+        )
+    )
+
+    return markup
 
 
 # ============================================================
@@ -7074,7 +7270,7 @@ Il bot elaborerà:
 • goal attesi
 • affidabilità dei dati
 • 🎟 schedine pronte: SICURA (fino a 10), EQUILIBRATA (fino a 25), AUDACE (fino a 50), MITO (51-60)
-• 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche
+• 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche\n• 🌍 Nazionali e 🏆 Champions/Europa: sottomenu con report e le stesse 4 schedine
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
 """.strip()
@@ -7147,6 +7343,47 @@ def messaggio_generico(message):
             message.chat.id,
             None
         )
+
+        return
+
+    if testo in {
+        "nazionali",
+        "nazioni"
+    }:
+
+        try:
+            bot.send_message(
+                message.chat.id,
+                "🌍 Nazionali",
+                reply_markup=(
+                    crea_menu_sottomenu("naz")
+                )
+            )
+        except Exception:
+            pass
+
+        return
+
+    if testo in {
+        "champions",
+        "champions league",
+        "europa league",
+        "coppe europa",
+        "europa"
+    }:
+
+        try:
+            bot.send_message(
+                message.chat.id,
+                "🏆 Champions & Europa",
+                reply_markup=(
+                    crea_menu_sottomenu(
+                        "europa"
+                    )
+                )
+            )
+        except Exception:
+            pass
 
         return
 
@@ -7242,15 +7479,18 @@ def callback_schedina(call):
 
         return
 
+    parti = call.data.split(":")
+
     try:
-        cap = float(
-            call.data.split(
-                ":",
-                1
-            )[1]
-        )
+        cap = float(parti[1])
     except Exception:
         cap = 10.0
+
+    scope = (
+        parti[2]
+        if len(parti) > 2
+        else None
+    )
 
     try:
 
@@ -7266,8 +7506,105 @@ def callback_schedina(call):
 
     avvia_schedina_chat(
         call.message.chat.id,
-        cap
+        cap,
+        slugs=slug_per_scope(scope)
     )
+
+
+@bot.callback_query_handler(
+    func=lambda call:
+    (
+        call.data
+        and call.data.startswith(
+            "sottomenu:"
+        )
+    )
+)
+def callback_sottomenu(call):
+
+    print("CLICK SOTTOMENU ricevuto: "
+          + str(getattr(call, "data", "?")))
+
+    if not call.message:
+
+        bot.answer_callback_query(
+            call.id,
+            "Premi /start per riavviare il menu."
+        )
+
+        return
+
+    cat_key = call.data.split(":", 1)[1]
+
+    markup = crea_menu_sottomenu(cat_key)
+
+    if not markup:
+
+        bot.answer_callback_query(
+            call.id,
+            "Sottomenu non disponibile."
+        )
+
+        return
+
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as exc:
+        print(f"⚠️ Toast sottomenu: {exc}")
+
+    titolo = SOTTOMENU[cat_key]["titolo"]
+
+    try:
+        bot.send_message(
+            call.message.chat.id,
+            (
+                f"{titolo}\n\n"
+                "Scegli la competizione da "
+                "analizzare, oppure genera "
+                "direttamente le 4 schedine "
+                "(SICURA, EQUILIBRATA, AUDACE, "
+                "MITO) su tutte le competizioni "
+                "del sottomenu."
+            ),
+            reply_markup=markup
+        )
+    except Exception as exc:
+        print(f"⚠️ Invio sottomenu: {exc}")
+
+
+@bot.callback_query_handler(
+    func=lambda call:
+    (
+        call.data
+        and call.data.startswith(
+            "menu:"
+        )
+    )
+)
+def callback_menu_inizio(call):
+
+    if not call.message:
+
+        bot.answer_callback_query(
+            call.id,
+            "Premi /start per riavviare il menu."
+        )
+
+        return
+
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as exc:
+        print(f"⚠️ Toast menu: {exc}")
+
+    try:
+        bot.send_message(
+            call.message.chat.id,
+            "⚽ <b>Menu principale</b>",
+            reply_markup=crea_menu_campionati()
+        )
+    except Exception as exc:
+        print(f"⚠️ Invio menu: {exc}")
 
 
 # ============================================================
@@ -7294,7 +7631,15 @@ def avvia_analisi_chat(
         )
     )
 
-    if not nome_key:
+    config_extra = (
+        None
+        if nome_key
+        else config_competizione(
+            league
+        )
+    )
+
+    if not nome_key and not config_extra:
 
         try:
             bot.send_message(
@@ -7308,9 +7653,19 @@ def avvia_analisi_chat(
 
         return
 
-    nome = CAMPIONATI[
-        nome_key
-    ]["nome"]
+    if nome_key:
+
+        nome = CAMPIONATI[
+            nome_key
+        ]["nome"]
+
+        chiave_report = nome_key
+
+    else:
+
+        nome = config_extra["nome"]
+
+        chiave_report = league
 
     with _CHAT_LOCK:
 
@@ -7401,7 +7756,7 @@ def avvia_analisi_chat(
                         )
 
                 report = crea_report(
-                    nome_key,
+                    chiave_report,
                     on_progress=progresso
                 )
 
@@ -7496,7 +7851,8 @@ def avvia_analisi_chat(
 
 def avvia_schedina_chat(
     chat_id: int,
-    cap: float
+    cap: float,
+    slugs: Optional[List[str]] = None
 ):
 
     with _CHAT_LOCK:
@@ -7533,6 +7889,19 @@ def avvia_schedina_chat(
                     f"🚀 Avvio schedine: cap {cap}"
                 )
 
+                ambito = (
+                    "nel sottomenu"
+                    if slugs
+                    else "sui 5 campionati"
+                )
+
+                dove = (
+                    "le competizioni del "
+                    "sottomenu"
+                    if slugs
+                    else "tutti i 5 campionati"
+                )
+
                 status_id = None
 
                 try:
@@ -7541,9 +7910,9 @@ def avvia_schedina_chat(
                         (
                             "🎟 <b>Preparazione "
                             "schedine in corso...</b>\n\n"
-                            "Analizzo tutti i 5 "
-                            "campionati per scegliere "
-                            "le partite più affidabili.\n"
+                            f"Analizzo {dove} per "
+                            "scegliere le partite "
+                            "più affidabili.\n"
                             "🔎 0/"
                         )
                     )
@@ -7570,7 +7939,7 @@ def avvia_schedina_chat(
                                 "🎟 <b>Preparazione "
                                 "schedine in corso...</b>\n\n"
                                 f"✅ {fatti}/{totali} partite "
-                                "analizzate sui 5 campionati\n"
+                                f"analizzate {ambito}\n"
                                 f"🏟 {html_safe(lega)}: "
                                 f"{html_safe(home)} - "
                                 f"{html_safe(away)}"
@@ -7585,7 +7954,8 @@ def avvia_schedina_chat(
 
                 testi = crea_schedine(
                     cap,
-                    on_progress=progresso
+                    on_progress=progresso,
+                    slugs=slugs
                 )
 
                 if not testi:
