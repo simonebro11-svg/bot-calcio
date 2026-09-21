@@ -100,6 +100,30 @@ QUOTA_PAYOUT = 0.94
 CAL_BASE_OVER25 = 52.9
 CAL_W_OVER25 = 0.35
 
+# Scala completa Over X.5 calibrata su 1000 partite
+# (frequenze reali dei totali gol e peso di shrinkage
+# per ogni soglia: vedere backtest.py, 'SCALA OVER/UNDER')
+CAL_SCALA_BASE = {
+    0: 93.7,
+    1: 75.4,
+    2: 52.9,
+    3: 30.2,
+    4: 14.9
+}
+
+CAL_SCALA_W = {
+    0: 0.20,
+    1: 0.30,
+    2: 0.35,
+    3: 0.35,
+    4: 0.40
+}
+
+# Doppia chance 12 sovraconfidente dal modello
+# (backtest 1000 p.): shrinkage forte verso la base
+DC12_W = 0.20
+DC12_BASE = 76.6
+
 CAL_BASE_GOL = 52.6
 CAL_W_GOL = 0.15
 
@@ -2675,6 +2699,279 @@ def format_infortuni(
 
 
 # ============================================================
+# METEO (open-meteo.com: gratuito, senza chiave)
+#
+# Informazione AGGIUNTIVA di lettura: NON modifica le
+# probabilita' (nessuna evidenza misurata sui nostri dati).
+# Citta' dello stadio da ESPN -> geocoding -> previsioni
+# del giorno della partita (disponibili fino a 16 giorni).
+# ============================================================
+
+OPEN_METEO_FORECAST = (
+    "https://api.open-meteo.com/"
+    "v1/forecast"
+)
+
+OPEN_METEO_GEO = (
+    "https://geocoding-api."
+    "open-meteo.com/v1/search"
+)
+
+METEO_GG_MAX = 16
+
+
+def _geocoda_citta(
+    citta: str
+) -> Optional[Tuple[float, float]]:
+
+    if not citta:
+        return None
+
+    cache_key = f"geo_{normalizza_nome(citta)}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            tuple(cached)
+            if cached != -1
+            else None
+        )
+
+    try:
+
+        r = requests.get(
+            OPEN_METEO_GEO,
+            params={
+                "name": citta,
+                "count": 1,
+                "language": "it",
+                "format": "json"
+            },
+            timeout=8
+        )
+
+        risultati = (
+            r.json().get("results", [])
+            if r.status_code == 200
+            else []
+        )
+
+        if risultati:
+
+            punto = (
+                float(risultati[0]["latitude"]),
+                float(risultati[0]["longitude"])
+            )
+
+            cache_set(cache_key, punto, 30 * 24 * 3600)
+
+            return punto
+
+        cache_set(cache_key, -1, 30 * 24 * 3600)
+
+        return None
+
+    except Exception as exc:
+
+        print(f"\u26a0\ufe0f Geocoding {citta}: {exc}")
+
+        return None
+
+
+def meteo_per_partita(
+    evento: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+
+    """Previsioni del giorno della partita nella citta'
+    dello stadio. None = non disponibile (troppo lontana,
+    venue assente o servizio non raggiungibile)."""
+
+    competitions = evento.get(
+        "competitions", []
+    )
+
+    venue = (
+        competitions[0].get("venue", {})
+        if competitions
+        else {}
+    )
+
+    citta = (
+        venue.get("address", {}).get("city")
+        or ""
+    ).strip()
+
+    if not citta:
+        return None
+
+    dt = (
+        evento.get("_datetime")
+        or parse_datetime(
+            evento.get("date", "")
+        )
+    )
+
+    if not dt:
+        return None
+
+    oggi = datetime.now(timezone.utc)
+
+    giorni = (
+        dt - oggi
+    ).total_seconds() / 86400
+
+    if giorni > METEO_GG_MAX:
+        return None
+
+    giorno = dt.strftime("%Y-%m-%d")
+
+    cache_key = (
+        f"meteo_{normalizza_nome(citta)}_{giorno}"
+    )
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    punto = _geocoda_citta(citta)
+
+    if not punto:
+        cache_set(cache_key, -1, CACHE_TTL)
+        return None
+
+    try:
+
+        r = requests.get(
+            OPEN_METEO_FORECAST,
+            params={
+                "latitude": punto[0],
+                "longitude": punto[1],
+                "daily": (
+                    "precipitation_sum,"
+                    "wind_speed_10m_max,"
+                    "temperature_2m_max,"
+                    "temperature_2m_min"
+                ),
+                "timezone": "auto",
+                "forecast_days": METEO_GG_MAX
+            },
+            timeout=8
+        )
+
+        if r.status_code != 200:
+            cache_set(cache_key, -1, CACHE_TTL)
+            return None
+
+        daily = r.json().get("daily", {})
+
+        tempi = daily.get("time", [])
+
+        if giorno not in tempi:
+            cache_set(cache_key, -1, CACHE_TTL)
+            return None
+
+        i = tempi.index(giorno)
+
+        def _val(chiave, default=None):
+
+            v = daily.get(chiave, [])
+
+            return (
+                v[i]
+                if i < len(v)
+                and v[i] is not None
+                else default
+            )
+
+        wx = {
+            "citta": citta,
+            "giorno": giorno,
+            "pioggia_mm": _val("precipitation_sum", 0.0),
+            "vento_kmh": _val("wind_speed_10m_max", 0.0),
+            "t_max": _val("temperature_2m_max"),
+            "t_min": _val("temperature_2m_min")
+        }
+
+        cache_set(cache_key, wx, 6 * 3600)
+
+        return wx
+
+    except Exception as exc:
+
+        print(f"\u26a0\ufe0f Meteo {citta}: {exc}")
+
+        cache_set(cache_key, -1, CACHE_TTL)
+
+        return None
+
+
+def format_meteo(
+    wx: Optional[Dict[str, Any]]
+) -> str:
+
+    if not wx:
+        return "N/D (previsioni oltre 16 giorni o venue non indicata)"
+
+    icone = []
+
+    pioggia = safe_float(
+        wx.get("pioggia_mm")
+    )
+
+    vento = safe_float(
+        wx.get("vento_kmh")
+    )
+
+    if pioggia >= 5:
+        icone.append("\U0001f327\ufe0f forte pioggia")
+    elif pioggia >= 1:
+        icone.append("\U0001f326\ufe0f pioggia")
+    elif pioggia > 0:
+        icone.append("\U0001f324\ufe0f sfioffi")
+
+    if vento >= 40:
+        icone.append("\U0001f4a8 vento forte")
+    elif vento >= 25:
+        icone.append("\U0001f32c\ufe0f ventoso")
+
+    t_max = wx.get("t_max")
+    t_min = wx.get("t_min")
+
+    temp = ""
+
+    if t_max is not None and t_min is not None:
+        temp = (
+            f" | \U0001f321\ufe0f "
+            f"{safe_float(t_min):.0f}\u2013{safe_float(t_max):.0f}\u00b0C"
+        )
+
+    dettaglio = (
+        f"{safe_float(pioggia):.1f} mm, "
+        f"vento {safe_float(vento):.0f} km/h"
+    )
+
+    if icone:
+
+        return (
+            f"{' '.join(icone)} "
+            f"({dettaglio}{temp}) \u2014 "
+            f"{html_safe(wx.get('citta', ''))}"
+        )
+
+    return (
+        f"\u2705 condizioni normali "
+        f"({dettaglio}{temp}) \u2014 "
+        f"{html_safe(wx.get('citta', ''))}"
+    )
+
+
+# ============================================================
 # EUROPA
 # ============================================================
 
@@ -3369,32 +3666,55 @@ def poisson_prob(
         return 0.0
 
 
-def probabilita_over_25(
-    expected_goals: float
+def probabilita_over(
+    expected_goals: float,
+    soglia: int
 ) -> float:
+
+    """Probabilita' totale gol >= soglia (soglia=k =>
+    'Over k.5'), con shrinkage calibrato per gradino
+    (CAL_SCALA_W / CAL_SCALA_BASE, backtest 1000 p.)."""
 
     under = 0.0
 
-    for k in range(3):
+    for i in range(soglia):
 
         under += poisson_prob(
             expected_goals,
-            k
+            i
         )
 
     over = clamp(
         (1 - under) * 100,
-        0,
-        100
+        0.5,
+        99.5
     )
 
-    # shrinkage di calibrazione (vedi CAL_*)
+    w = CAL_SCALA_W.get(
+        soglia,
+        0.35
+    )
+
+    base = CAL_SCALA_BASE.get(
+        soglia,
+        52.9
+    )
+
     return clamp(
-        CAL_W_OVER25 * over
-        + (1 - CAL_W_OVER25)
-        * CAL_BASE_OVER25,
+        w * over
+        + (1 - w) * base,
         1,
         99
+    )
+
+
+def probabilita_over_25(
+    expected_goals: float
+) -> float:
+
+    return probabilita_over(
+        expected_goals,
+        2
     )
 
 
@@ -3698,6 +4018,14 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
+    # METEO (informativo, non altera le probabilita')
+    # --------------------------------------------------------
+
+    wx = meteo_per_partita(
+        evento
+    )
+
+    # --------------------------------------------------------
     # RIPOSO / FATICA
     # --------------------------------------------------------
 
@@ -3841,6 +4169,7 @@ def analizza_partita(
         "h2h": h2h,
         "europe_home": europe_home,
         "europe_away": europe_away,
+        "meteo": wx,
         "riposo_home": riposo_home,
         "riposo_away": riposo_away,
         "fatica_home": fatica_home,
@@ -3851,6 +4180,26 @@ def analizza_partita(
         "prob_draw": prob_draw,
         "prob_away": prob_away,
         "expected_goals": expected_goals,
+        "over15": probabilita_over(
+            expected_goals,
+            1
+        ),
+        "over35": probabilita_over(
+            expected_goals,
+            3
+        ),
+        "under15": 100 - probabilita_over(
+            expected_goals,
+            1
+        ),
+        "under35": 100 - probabilita_over(
+            expected_goals,
+            3
+        ),
+        "under45": 100 - probabilita_over(
+            expected_goals,
+            4
+        ),
         "over25": over25,
         "under25": under25,
         "gol": gol,
@@ -4060,6 +4409,10 @@ Indice fatica: {analisi['fatica_away']}/70
 
 {away}:
 {format_infortuni(injuries_a)}
+
+<b>🌦 METEO (stadio)</b>
+
+{format_meteo(analisi['meteo'])}
 
 <b>🔥 MOMENTUM</b>
 
@@ -4597,6 +4950,13 @@ def migliori_pick(
         "2": analisi["prob_away"],
         "Over 2.5": analisi["over25"],
         "Under 2.5": analisi["under25"],
+        # scala O/U calibrata: gradini intermedi per
+        # costruire quote con meno rischio per gamba
+        "Over 1.5": analisi["over15"],
+        "Under 4.5": analisi["under45"],
+        "Under 3.5": analisi["under35"],
+        "Over 3.5": analisi["over35"],
+        "Under 1.5": analisi["under15"],
         "Gol": analisi["gol"],
         "No Gol": analisi["no_gol"],
         # doppie chance (da 1X2 calibrato): gambe a
@@ -4607,9 +4967,14 @@ def migliori_pick(
             / tot_1x2 * 100
         ),
         "Doppia 12": (
-            (analisi["prob_home"]
-             + analisi["prob_away"])
-            / tot_1x2 * 100
+            DC12_W
+            * (
+                (analisi["prob_home"]
+                 + analisi["prob_away"])
+                / tot_1x2 * 100
+            )
+            + (1 - DC12_W)
+            * DC12_BASE
         ),
         "Doppia X2": (
             (analisi["prob_draw"]
@@ -4663,7 +5028,7 @@ TIERS_SCHEDINE = [
         "min_legs": 2,
         "max_legs": 3,
         "floor": 1.5,
-        "candidati": 24,
+        "candidati": 34,
         "prob_min": 0.40,
         "no_fatica": True
     },
@@ -4673,7 +5038,7 @@ TIERS_SCHEDINE = [
         "min_legs": 2,
         "max_legs": 4,
         "floor": 4.0,
-        "candidati": 24,
+        "candidati": 34,
         "prob_min": 0.40,
         "no_fatica": True
     },
@@ -4683,8 +5048,17 @@ TIERS_SCHEDINE = [
         "min_legs": 3,
         "max_legs": 6,
         "floor": 15.0,
-        "candidati": 24,
+        "candidati": 34,
         "prob_min": 0.22
+    },
+    {
+        "nome": "💣 SCHEDINA MITO",
+        "cap": 60.0,
+        "min_legs": 4,
+        "max_legs": 6,
+        "floor": 50.0,
+        "candidati": 34,
+        "prob_min": 0.20
     }
 ]
 
@@ -4735,10 +5109,25 @@ def costruisci_schedina(
         key=lambda p: -p["quota"]
     )[:tier["candidati"] // 2]
 
+    # GRUPPO MID: la parte centrale della scala quote
+    # (1.35-2.19) e' quella che consente di riempire
+    # le fasce con il minor rischio per gamba: senza
+    # questo gruppo resta un buco tra top-probabilita'
+    # (1.03-1.14) e top-quota (2.2+)
+    mid = [
+        p for p in candidati
+        if 1.35 <= p["quota"] <= 2.19
+    ]
+
+    mid = sorted(
+        mid,
+        key=lambda p: -p["prob"]
+    )[:10]
+
     visti_s = set()
     candidati = []
 
-    for p in per_prob + per_quota:
+    for p in per_prob + mid + per_quota:
 
         k = (
             p["match_key"],
@@ -4752,8 +5141,12 @@ def costruisci_schedina(
 
         candidati.append(p)
 
-    # fasce di quota: prima quella target, poi
-    # allargate (0.6x, poi qualsiasi quota sotto cap)
+    # NUOVA LOGICA FASCE: prima la fascia target
+    # [floor, cap]; solo se NON esiste nessuna
+    # combinazione in fascia si scende (floor*0.5,
+    # poi qualunque quota sotto cap). Dentro la
+    # prima fascia non vuota vince il punteggio di
+    # probabilita' piu' alto.
     fasce = [
         tier["floor"],
         tier["floor"] * 0.5,
@@ -4761,9 +5154,11 @@ def costruisci_schedina(
     ]
 
     best = None
-    best_key = None
 
     for floor in fasce:
+
+        best_fase = None
+        best_score = None
 
         for size in range(
             tier["min_legs"],
@@ -4804,27 +5199,22 @@ def costruisci_schedina(
                 if quota_tot > tier["cap"]:
                     continue
 
-                in_range = (
-                    quota_tot >= floor
-                )
-
-                key = (
-                    in_range,
-                    score
-                )
+                if quota_tot < floor:
+                    continue
 
                 if (
-                    best_key is None
-                    or key > best_key
+                    best_score is None
+                    or score > best_score
                 ):
 
-                    best_key = key
-                    best = (
+                    best_score = score
+                    best_fase = (
                         combo,
                         quota_tot
                     )
 
-        if best and best_key[0]:
+        if best_fase:
+            best = best_fase
             break
 
     if not best:
@@ -4951,6 +5341,27 @@ def format_schedina(
 
         if quando != "data N/D":
             extra.append(quando)
+
+        wx_leg = analisi.get("meteo")
+
+        if wx_leg:
+
+            pioggia = safe_float(
+                wx_leg.get("pioggia_mm")
+            )
+
+            vento = safe_float(
+                wx_leg.get("vento_kmh")
+            )
+
+            meteo_txt = (
+                f"\U0001f326 {pioggia:.0f}mm "
+                f"{vento:.0f}km/h"
+                if pioggia >= 1
+                else f"\u2705 {vento:.0f}km/h"
+            )
+
+            extra.append(meteo_txt)
 
         if extra:
             righe.append(
@@ -5106,7 +5517,7 @@ def crea_schedine(
             pool.extend(
                 migliori_pick(
                     analisi,
-                    max_pick=6
+                    max_pick=10
                 )
             )
 
@@ -5272,10 +5683,17 @@ def crea_menu_campionati():
         types.InlineKeyboardButton(
             "⚡ EQUILIBRATA ≤25",
             callback_data="schedina:25"
-        ),
+        )
+    )
+
+    markup.row(
         types.InlineKeyboardButton(
             "🔥 AUDACE ≤50",
             callback_data="schedina:50"
+        ),
+        types.InlineKeyboardButton(
+            "💣 MITO 51-60",
+            callback_data="schedina:60"
         )
     )
 
@@ -5332,7 +5750,7 @@ Il bot elaborerà:
 • Gol/No Gol
 • goal attesi
 • affidabilità dei dati
-• 🎟 schedine pronte: SICURA (quota fino a 10), EQUILIBRATA (fino a 25), AUDACE (fino a 50)
+• 🎟 schedine pronte: SICURA (fino a 10), EQUILIBRATA (fino a 25), AUDACE (fino a 50), MITO (51-60)
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
 """.strip()
@@ -5880,7 +6298,7 @@ def avvia_schedina_chat(
                         bot.edit_message_text(
                             (
                                 "✅ Analisi completate.\n"
-                                "🎟 Invio delle 3 schedine..."
+                                "🎟 Invio della schedina..."
                             ),
                             chat_id=chat_id,
                             message_id=status_id
