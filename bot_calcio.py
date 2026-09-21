@@ -3185,6 +3185,149 @@ def quote_mercato_per_partita(
     }
 
 
+# ------------------------------------------------------------
+# FORMA xG (dal CSV corrente di football-data.co.uk)
+#
+# Test su 106 partite 2026-27 (entrambe le squadre con >=3
+# gare xG): log loss Over2.5 forma-gol 0.6871 -> forma-xG
+# 0.6833. Si applica un blend 50/50 nel modello: robusto e
+# reversibile se il CSV non ha dati.
+# ------------------------------------------------------------
+
+XG_W = 0.5
+XG_MIN_PARTITE = 3
+XG_FINESTRA = 6
+
+
+def _xg_form_da_csv(
+    league: str,
+    team_name: str
+) -> Optional[Dict[str, Any]]:
+
+    """Media xG fatti/subiti sulle ultime XG_FINESTRA
+    partite GIOCATE della stagione corrente (dal CSV).
+    None se non disponibile o meno di XG_MIN_PARTITE."""
+
+    righe = _fduk_righe(league)
+
+    if not righe:
+        return None
+
+    cache_key = (
+        f"xg_form_{league}_"
+        f"{normalizza_nome(team_name)}"
+    )
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    partite = []
+
+    for riga in righe:
+
+        if not riga.get("FTHG"):
+            continue
+
+        if not (
+            riga.get("HxG")
+            and riga.get("AxG")
+        ):
+            continue
+
+        casa = _fduk_matcha(
+            team_name,
+            riga.get("HomeTeam", "")
+        )
+
+        fuori = _fduk_matcha(
+            team_name,
+            riga.get("AwayTeam", "")
+        )
+
+        if not casa and not fuori:
+            continue
+
+        try:
+
+            partite.append({
+                "data": riga.get("Date", ""),
+                "fatto": float(
+                    riga["HxG"]
+                    if casa
+                    else riga["AxG"]
+                ),
+                "subito": float(
+                    riga["AxG"]
+                    if casa
+                    else riga["HxG"]
+                )
+            })
+
+        except Exception:
+            continue
+
+    if len(partite) < XG_MIN_PARTITE:
+
+        cache_set(cache_key, -1, CACHE_TTL)
+
+        return None
+
+    ultime = partite[-XG_FINESTRA:]
+
+    n = len(ultime)
+
+    form = {
+        "gf": sum(
+            p["fatto"] for p in ultime
+        ) / n,
+        "gs": sum(
+            p["subito"] for p in ultime
+        ) / n,
+        "n": n
+    }
+
+    cache_set(cache_key, form)
+
+    return form
+
+
+def _applica_xg(
+    stats: Dict[str, Any],
+    xg: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+
+    """Blend 50/50 tra forma-gol e forma-xG per i soli
+    valori di attacco/difesa usati dal modello."""
+
+    if (
+        not xg
+        or xg.get("n", 0) < XG_MIN_PARTITE
+    ):
+        return stats
+
+    w = XG_W
+
+    return {
+        **stats,
+        "gf": (
+            w * xg["gf"]
+            + (1 - w)
+            * safe_float(stats.get("gf"))
+        ),
+        "gs": (
+            w * xg["gs"]
+            + (1 - w)
+            * safe_float(stats.get("gs"))
+        )
+    }
+
+
 # ============================================================
 # EUROPA
 # ============================================================
@@ -4132,6 +4275,30 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
+    # FORMA xG (blend nel modello, il report resta sui gol)
+    # --------------------------------------------------------
+
+    xg_home = _xg_form_da_csv(
+        league,
+        home_name
+    )
+
+    xg_away = _xg_form_da_csv(
+        league,
+        away_name
+    )
+
+    stats_model_home = _applica_xg(
+        stats_home,
+        xg_home
+    )
+
+    stats_model_away = _applica_xg(
+        stats_away,
+        xg_away
+    )
+
+    # --------------------------------------------------------
     # CASA / TRASFERTA
     # --------------------------------------------------------
 
@@ -4294,13 +4461,13 @@ def analizza_partita(
 
     momentum_home = (
         calcola_momentum(
-            stats_home
+            stats_model_home
         )
     )
 
     momentum_away = (
         calcola_momentum(
-            stats_away
+            stats_model_away
         )
     )
 
@@ -4315,8 +4482,8 @@ def analizza_partita(
     ) = calcola_probabilita(
         home_name,
         away_name,
-        stats_home,
-        stats_away,
+        stats_model_home,
+        stats_model_away,
         ppg_casa,
         ppg_trasferta,
         fatica_home,
@@ -4331,8 +4498,8 @@ def analizza_partita(
     # --------------------------------------------------------
 
     expected_goals = stima_goal(
-        stats_home,
-        stats_away,
+        stats_model_home,
+        stats_model_away,
         ppg_casa,
         ppg_trasferta
     )
@@ -4346,7 +4513,7 @@ def analizza_partita(
     under25 = 100 - over25
 
     gol = probabilita_gol(
-        stats_home,
+        stats_model_home,
         stats_away
     )
 
@@ -4408,6 +4575,12 @@ def analizza_partita(
         "europe_away": europe_away,
         "meteo": wx,
         "quote_mercato": quote_mercato,
+        "xg_home": (
+            stats_model_home is not stats_home
+        ),
+        "xg_away": (
+            stats_model_away is not stats_away
+        ),
 
 
 
@@ -4593,6 +4766,18 @@ def format_report_partita(
 
         return f"{value:.2f}"
 
+    xg_line_home = (
+        "Forma xG: inclusa nel modello"
+        if analisi.get("xg_home")
+        else ""
+    )
+
+    xg_line_away = (
+        "Forma xG: inclusa nel modello"
+        if analisi.get("xg_away")
+        else ""
+    )
+
     def riposo_text(value):
 
         if value is None:
@@ -4665,10 +4850,12 @@ def format_report_partita(
 {home}: {sh['sequenza']}
 PPG {sh['ppg']:.2f} | GF {sh['gf']:.2f} | GS {sh['gs']:.2f}
 PPG campionato: {lp_text(analisi['lp_home'])}
+{xg_line_home}
 
 {away}: {sa['sequenza']}
 PPG {sa['ppg']:.2f} | GF {sa['gf']:.2f} | GS {sa['gs']:.2f}
 PPG campionato: {lp_text(analisi['lp_away'])}
+{xg_line_away}
 
 <b>🏠 RENDIMENTO CASA / TRASFERTA</b>
 
