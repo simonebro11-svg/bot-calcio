@@ -2972,6 +2972,220 @@ def format_meteo(
 
 
 # ============================================================
+# QUOTE REALI DEL MERCATO (football-data.co.uk: CSV pubblici
+# gratuiti con le quote dei principali bookmaker)
+#
+# Attivazione automatica: le quote delle partite future
+# compaiono nei CSV qualche giorno prima del turno; durante
+# le pause di calendario non ci sono righe -> sezione "N/D".
+# Serve SOLO da confronto: la quota REALE sostituisce quella
+# stimata nel calcolo della schedina (payout realistico).
+# ============================================================
+
+FDUK_BASE = "https://www.football-data.co.uk/mmz4281"
+
+FDUK_CODICI = {
+    "ita.1": "I1",
+    "eng.1": "E0",
+    "esp.1": "SP1",
+    "ger.1": "D1",
+    "fra.1": "F1"
+}
+
+# nomi nel CSV football-data.co.uk diversi da quelli ESPN
+FDUK_ALIAS = {
+    "manchester united": "man united",
+    "manchester city": "man city",
+    "nottingham forest": "nott m forest",
+    "tottenham hotspur": "tottenham",
+    "west ham united": "west ham",
+    "wolverhampton wanderers": "wolves",
+    "atletico madrid": "ath madrid",
+    "athletic bilbao": "ath bilbao",
+    "athletic club": "ath bilbao",
+    "real sociedad": "sociedad",
+    "espanyol": "espanol",
+    "real betis": "betis",
+    "celta vigo": "celta",
+    "deportivo alaves": "alaves",
+    "borussia monchengladbach": "borussia m gladbach",
+    "paris saint germain": "paris sg",
+    "borussia dortmund": "dortmund",
+    "bayern monaco": "bayern munich"
+}
+
+
+def _fduk_url_stagione(league: str) -> str:
+
+    oggi = datetime.now(timezone.utc)
+
+    anno = (
+        oggi.year
+        if oggi.month >= 7
+        else oggi.year - 1
+    )
+
+    codice = FDUK_CODICI.get(league, "")
+
+    if not codice:
+        return ""
+
+    return (
+        f"{FDUK_BASE}/"
+        f"{str(anno)[-2:]}{str(anno + 1)[-2:]}/"
+        f"{codice}.csv"
+    )
+
+
+def _fduk_matcha(nome_espn: str, nome_csv: str) -> bool:
+
+    a = normalizza_nome(nome_espn)
+
+    a = FDUK_ALIAS.get(a, a)
+
+    b = normalizza_nome(nome_csv)
+
+    return (
+        a == b
+        or a in b
+        or b in a
+    )
+
+
+def _fduk_righe(league: str) -> Optional[List[Dict[str, Any]]]:
+
+    cache_key = f"fduk_{league}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    url = _fduk_url_stagione(league)
+
+    if not url:
+        return None
+
+    try:
+
+        r = requests.get(url, timeout=15)
+
+        if r.status_code != 200:
+
+            cache_set(cache_key, -1, 3600)
+
+            return None
+
+        testo = r.content.decode("utf-8-sig")
+
+        import csv as _csv
+        import io as _io
+
+        righe = list(
+            _csv.DictReader(
+                _io.StringIO(testo)
+            )
+        )
+
+        cache_set(cache_key, righe, 6 * 3600)
+
+        return righe
+
+    except Exception as exc:
+
+        print(f"\u26a0\ufe0f football-data.co.uk {league}: {exc}")
+
+        cache_set(cache_key, -1, 3600)
+
+        return None
+
+
+def _fduk_num(riga, *chiavi) -> Optional[float]:
+
+    for k in chiavi:
+
+        v = (
+            riga.get(k) or ""
+        ).strip().replace(",", ".")
+
+        if v:
+
+            try:
+                return float(v)
+
+            except Exception:
+                pass
+
+    return None
+
+
+def quote_mercato_per_partita(
+    home_name: str,
+    away_name: str,
+    league: str,
+    data_evento: Optional[datetime]
+) -> Optional[Dict[str, Any]]:
+
+    """Quote reali del mercato per la partita (se
+    gia' pubblicate nei CSV). None = non disponibili."""
+
+    righe = _fduk_righe(league)
+
+    if not righe:
+        return None
+
+    trovata = None
+
+    for riga in righe:
+
+        if riga.get("FTHG"):
+            continue
+
+        if (
+            riga.get("HomeTeam")
+            and riga.get("AwayTeam")
+            and _fduk_matcha(
+                home_name,
+                riga["HomeTeam"]
+            )
+            and _fduk_matcha(
+                away_name,
+                riga["AwayTeam"]
+            )
+        ):
+
+            trovata = riga
+
+            break
+
+    if not trovata:
+        return None
+
+    q1 = _fduk_num(trovata, "AvgH", "B365H", "PSH")
+    qx = _fduk_num(trovata, "AvgD", "B365D", "PSD")
+    q2 = _fduk_num(trovata, "AvgA", "B365A", "PSA")
+
+    qover = _fduk_num(trovata, "Avg>2.5", "B365>2.5", "Max>2.5")
+    qunder = _fduk_num(trovata, "Avg<2.5", "B365<2.5", "Max<2.5")
+
+    if not (q1 and qx and q2) and not (qover and qunder):
+        return None
+
+    return {
+        "q1": q1,
+        "qx": qx,
+        "q2": q2,
+        "over25": qover,
+        "under25": qunder,
+        "data_csv": trovata.get("Date", "")
+    }
+
+
+# ============================================================
 # EUROPA
 # ============================================================
 
@@ -4026,6 +4240,29 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
+    # QUOTE REALI DEL MERCATO (football-data.co.uk)
+    # --------------------------------------------------------
+
+    quote_mercato = (
+        quote_mercato_per_partita(
+            home_name,
+            away_name,
+            league,
+            data_evento
+        )
+    )
+
+
+
+
+
+
+
+
+
+
+
+    # --------------------------------------------------------
     # RIPOSO / FATICA
     # --------------------------------------------------------
 
@@ -4170,6 +4407,12 @@ def analizza_partita(
         "europe_home": europe_home,
         "europe_away": europe_away,
         "meteo": wx,
+        "quote_mercato": quote_mercato,
+
+
+
+
+
         "riposo_home": riposo_home,
         "riposo_away": riposo_away,
         "fatica_home": fatica_home,
@@ -4244,6 +4487,50 @@ def format_europa(
         html_safe(c)
         for c in competizioni
     )
+
+
+def format_quote_mercato(
+    q: Optional[Dict[str, Any]]
+) -> str:
+
+    if not q:
+        return (
+            "N/D (il mercato non ha ancora "
+            "pubblicato le quote: di norma "
+            "arrivano pochi giorni prima del turno)"
+        )
+
+    righe = []
+
+    if q.get("q1") and q.get("qx") and q.get("q2"):
+
+        tot = (
+            1.0 / q["q1"]
+            + 1.0 / q["qx"]
+            + 1.0 / q["q2"]
+        )
+
+        righe.append(
+            f"1X2 reali: {q['q1']:.2f} / "
+            f"{q['qx']:.2f} / {q['q2']:.2f}"
+        )
+
+        righe.append(
+            f"Probabilit\u00e0 di mercato: "
+            f"{100 / (q['q1'] * tot):.0f}% / "
+            f"{100 / (q['qx'] * tot):.0f}% / "
+            f"{100 / (q['q2'] * tot):.0f}%"
+        )
+
+    if q.get("over25") and q.get("under25"):
+
+        righe.append(
+            f"Over/Under 2.5 reali: "
+            f"{q['over25']:.2f} / "
+            f"{q['under25']:.2f}"
+        )
+
+    return "\n".join(righe)
 
 
 # ============================================================
@@ -4438,6 +4725,10 @@ Gol: {format_percent(analisi['gol'])}
 No Gol: {format_percent(analisi['no_gol'])}
 
 Goal attesi: <b>{analisi['expected_goals']:.2f}</b>
+
+<b>💰 QUOTA REALE (mercato)</b>
+
+{format_quote_mercato(analisi.get('quote_mercato'))}
 
 <b>⭐ PRONOSTICO PRINCIPALE</b>
 
@@ -4997,6 +5288,36 @@ def migliori_pick(
         f"{analisi.get('evento', {}).get('date','')}"
     )
 
+    # quote reali del mercato (se pubblicate) per i
+    # mercati coperti dai CSV di football-data.co.uk
+    reali = {}
+
+    qm = analisi.get("quote_mercato")
+
+    if qm:
+
+        reali = {
+            "1": qm.get("q1"),
+            "X": qm.get("qx"),
+            "2": qm.get("q2"),
+            "Over 2.5": qm.get("over25"),
+            "Under 2.5": qm.get("under25")
+        }
+
+    tot_1 = sum(
+        1.0 / reali[k]
+        for k in ("1", "X", "2")
+        if reali.get(k)
+    ) or None
+
+    tot_ou = (
+        1.0 / reali["Over 2.5"]
+        + 1.0 / reali["Under 2.5"]
+        if reali.get("Over 2.5")
+        and reali.get("Under 2.5")
+        else None
+    )
+
     picks = []
 
     for mercato, prob in ordine:
@@ -5007,11 +5328,34 @@ def migliori_pick(
             99.0
         )
 
+        quota = quota_stimata(prob)
+
+        qr = reali.get(mercato)
+
+        implied = None
+
+        if qr:
+
+            if mercato in ("1", "X", "2") and tot_1:
+                implied = 100.0 / (qr * tot_1)
+
+            elif mercato == "Over 2.5" and tot_ou:
+                implied = 100.0 / (qr * tot_ou)
+
+            elif mercato == "Under 2.5" and tot_ou:
+                implied = 100.0 / (qr * tot_ou)
+
+            # la quota REALE e' quella che verremmo
+            # pagati: sostituisce la stima
+            quota = safe_float(qr, quota)
+
         picks.append({
             "analisi": analisi,
             "mercato": mercato,
             "prob": prob,
-            "quota": quota_stimata(prob),
+            "quota": quota,
+            "quota_reale": qr,
+            "implied_reale": implied,
             "aff": safe_int(
                 analisi.get("affidabilita")
             ),
@@ -5368,12 +5712,30 @@ def format_schedina(
                 " | ".join(extra)
             )
 
+        extra_leg = ""
+
+        if leg.get("quota_reale"):
+
+            extra_leg = (
+                f" (reale {leg['quota_reale']:.2f})"
+            )
+
+            imp = leg.get("implied_reale")
+
+            if (
+                imp
+                and leg["prob"]
+                > imp + 5
+            ):
+                extra_leg += " \u2b50"
+
         righe.append(
             f"Pronostico: "
             f"<b>{html_safe(leg['mercato'])}</b> "
             f"({leg['prob']:.0f}%) "
-            f"— quota {leg['quota']:.2f} "
-            f"| affidabilità {leg['aff']}%"
+            f"\u2014 quota {leg['quota']:.2f}"
+            f"{extra_leg} "
+            f"| affidabilit\u00e0 {leg['aff']}%"
         )
 
     righe.append("")
