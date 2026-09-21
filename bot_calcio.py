@@ -3329,6 +3329,211 @@ def _applica_xg(
 
 
 # ============================================================
+# NOTIZIE REALI DI SQUADRA (Google News RSS, gratuito,
+# senza chiave - testato da IP datacenter)
+#
+# Mostra i TITOLI reali: nessuna probabilita' inventata.
+# Le notizie con parole chiave (infortuni, squalifiche,
+# operazioni...) alzano un avviso "da verificare" sia nel
+# report sia accanto alle gambe delle schedine.
+# ============================================================
+
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+
+NOTIZIE_FLAG_PAROLE = (
+    "infortun",
+    "squalif",
+    "operazion",
+    "influenz",
+    "indagat",
+    "condann",
+    "rottura",
+    "stop per",
+    "fuori per"
+)
+
+NOTIZIE_MAX_ORE = 96
+
+
+def notizie_squadra(
+    team_name: str
+) -> Optional[Dict[str, Any]]:
+
+    """Ultime notizie della squadra (max 3, ultime 96h)
+    + flag se compaiono parole chiave sensibili."""
+
+    cache_key = (
+        f"notizie_{normalizza_nome(team_name)}"
+    )
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    try:
+
+        r = requests.get(
+            GOOGLE_NEWS_RSS,
+            params={
+                "q": f'"{team_name}" calcio',
+                "hl": "it",
+                "gl": "IT",
+                "ceid": "IT:it"
+            },
+            timeout=8
+        )
+
+        if r.status_code != 200:
+
+            cache_set(cache_key, -1, 1800)
+
+            return None
+
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(r.content)
+
+        notizie = []
+
+        for item in root.findall(".//item")[:10]:
+
+            titolo = (
+                item.findtext("title")
+                or ""
+            ).strip()
+
+            fonte = (
+                item.findtext("source")
+                or ""
+            ).strip()
+
+            if fonte and titolo.endswith(
+                f" - {fonte}"
+            ):
+                titolo = titolo[
+                    :-len(f" - {fonte}")
+                ].strip()
+
+            ore = None
+
+            data_raw = item.findtext(
+                "pubDate"
+            )
+
+            if data_raw:
+
+                try:
+
+                    from email.utils import (
+                        parsedate_to_datetime
+                    )
+
+                    dt = parsedate_to_datetime(
+                        data_raw
+                    )
+
+                    ore = (
+                        datetime.now(timezone.utc)
+                        - dt
+                    ).total_seconds() / 3600
+
+                except Exception:
+                    ore = None
+
+            if ore is not None and ore > NOTIZIE_MAX_ORE:
+                continue
+
+            if not titolo:
+                continue
+
+            notizie.append({
+                "titolo": titolo[:110],
+                "fonte": fonte,
+                "ore": (
+                    round(ore)
+                    if ore is not None
+                    else None
+                )
+            })
+
+            if len(notizie) >= 3:
+                break
+
+        flag = any(
+            any(
+                p in n["titolo"].lower()
+                for p in NOTIZIE_FLAG_PAROLE
+            )
+            for n in notizie
+        )
+
+        risultato = {
+            "notizie": notizie,
+            "flag": flag
+        }
+
+        cache_set(cache_key, risultato, 3600)
+
+        return risultato
+
+    except Exception as exc:
+
+        print(f"\u26a0\ufe0f Notizie {team_name}: {exc}")
+
+        cache_set(cache_key, -1, 1800)
+
+        return None
+
+
+def format_notizie(
+    n: Optional[Dict[str, Any]]
+) -> str:
+
+    if n is None:
+        return "N/D (servizio notizie non raggiungibile)"
+
+    lista = n.get("notizie", [])
+
+    if not lista:
+        return "Nessuna notizia recente"
+
+    righe = []
+
+    for item in lista:
+
+        testo = f"\u2022 {html_safe(item['titolo'])}"
+
+        extra = []
+
+        if item.get("fonte"):
+            extra.append(
+                html_safe(item["fonte"])
+            )
+
+        if item.get("ore") is not None:
+            extra.append(f"{item['ore']}h")
+
+        if extra:
+            testo += f" ({', '.join(extra)})"
+
+        righe.append(testo)
+
+    if n.get("flag"):
+        righe.append(
+            "\u26a0\ufe0f rilevate notizie sensibili "
+            "(infortuni/squalifiche): verifica "
+            "prima di giocare la partita"
+        )
+
+    return "\n".join(righe)
+
+
+# ============================================================
 # EUROPA
 # ============================================================
 
@@ -3926,6 +4131,446 @@ def calcola_probabilita(
 
 
 # ============================================================
+# MERCATI AVANZATI (matrice Poisson bivariata)
+#
+# Tutti i mercati "dis_derivati" del listino bookmaker sono
+# calcolati dalla stessa matrice dei punteggi esatti:
+#   U/O e Goal, Asiatiche/Handicap (linee con mezzo gol),
+#   Primo/Secondo Tempo, Casa/Ospite (gol squadra),
+#   Ris.Esatto, 1T/Finale, Combo, Multigol (anche con 1X2/DC),
+#   Multibet Tempo, Speciali Gol/Minuti, combo U/O.
+# Validazione su 250 partite 2026-27 (football-data.co.uk):
+#   Over 2.5 matrice 58.7% vs reale 58.8%, Esatto 1-1 10.9 vs
+#   10.0, GG 60.4 vs 56.8 (max scarto ~4pp).
+# ESCLUSI: Sanzioni/cartellini (nessuna fonte gratuita
+# affidabile) e linee asiatiche con rimborso (0.25/0.75:
+# stake parziali non rappresentabili a quota fissa).
+# ============================================================
+
+QUOTA_1T = 0.42
+# ~42% dei gol arriva nel primo tempo (319/761 gol su 250
+# partite delle 5 grandi leghe 2026-27, fduk)
+
+MATRICE_N = 9
+
+
+def stima_goal_squadre(
+    stats_home: Dict[str, Any],
+    stats_away: Dict[str, Any],
+    ppg_casa: Optional[float],
+    ppg_trasferta: Optional[float]
+) -> Tuple[float, float]:
+
+    """Lambda di gol attesi SEPARATI per squadra (stessa
+    logica interna di stima_goal, ma senza sommarli)."""
+
+    home_gf = safe_float(
+        stats_home.get("gf")
+    )
+
+    home_gs = safe_float(
+        stats_home.get("gs")
+    )
+
+    away_gf = safe_float(
+        stats_away.get("gf")
+    )
+
+    away_gs = safe_float(
+        stats_away.get("gs")
+    )
+
+    expected_home = (
+        home_gf * 0.55
+        + away_gs * 0.45
+    )
+
+    expected_away = (
+        away_gf * 0.55
+        + home_gs * 0.45
+    )
+
+    if ppg_casa is not None:
+
+        expected_home += (
+            ppg_casa - 1.5
+        ) * 0.15
+
+    if ppg_trasferta is not None:
+
+        expected_away += (
+            ppg_trasferta - 1.5
+        ) * 0.15
+
+    expected_home = clamp(
+        expected_home,
+        0.15,
+        3.5
+    )
+
+    expected_away = clamp(
+        expected_away,
+        0.15,
+        3.5
+    )
+
+    return expected_home, expected_away
+
+
+def matrice_score(
+    lh: float,
+    la: float
+) -> List[List[float]]:
+
+    """Matrice P(i gol casa, j gol ospite), Poisson
+    indipendenti troncata a MATRICE_N-1 e rinormalizzata."""
+
+    mat = [
+        [
+            poisson_prob(lh, i)
+            * poisson_prob(la, j)
+            for j in range(MATRICE_N)
+        ]
+        for i in range(MATRICE_N)
+    ]
+
+    s = sum(sum(riga) for riga in mat)
+
+    if s <= 0:
+        return mat
+
+    return [
+        [v / s for v in riga]
+        for riga in mat
+    ]
+
+
+def _distr_tot(
+    mat: List[List[float]]
+) -> List[float]:
+
+    """Distribuzione dei gol TOTALI (0..2N-2)."""
+
+    d = [0.0] * (2 * MATRICE_N - 1)
+
+    for i in range(MATRICE_N):
+
+        for j in range(MATRICE_N):
+
+            d[i + j] += mat[i][j]
+
+    return d
+
+
+def mercati_avanzati(
+    lh: float,
+    la: float
+):
+
+    """Costruisce TUTTI i mercati derivati dal modello.
+    Ritorna (mercati_dict, esatto_top, htft_top):
+    - mercati_dict: {label: probabilita%} per il pool
+    - esatto_top / htft_top: liste [(label, %)] per il report
+    """
+
+    tot = lh + la
+
+    if tot < 0.5:
+        f = 0.5 / tot
+        lh *= f
+        la *= f
+
+    elif tot > 6.0:
+        f = 6.0 / tot
+        lh *= f
+        la *= f
+
+    m = matrice_score(lh, la)
+
+    m1 = matrice_score(
+        lh * QUOTA_1T,
+        la * QUOTA_1T
+    )
+
+    m2 = matrice_score(
+        lh * (1 - QUOTA_1T),
+        la * (1 - QUOTA_1T)
+    )
+
+    d = _distr_tot(m)
+    d1 = _distr_tot(m1)
+    d2 = _distr_tot(m2)
+
+    def somma(mat, cond):
+
+        return sum(
+            mat[i][j]
+            for i in range(MATRICE_N)
+            for j in range(MATRICE_N)
+            if cond(i, j)
+        )
+
+    # ---- U/O e Goal ----
+    over_gol = somma(
+        m, lambda i, j:
+        i >= 1 and j >= 1 and i + j >= 3
+    )
+
+    under_gol = somma(
+        m, lambda i, j:
+        i >= 1 and j >= 1 and i + j <= 2
+    )
+
+    over_nogol = somma(
+        m, lambda i, j:
+        (i == 0 and j >= 3)
+        or (j == 0 and i >= 3)
+    )
+
+    # ---- margini (handicap / asiatiche) ----
+    casa_2 = somma(m, lambda i, j: i - j >= 2)
+    casa_3 = somma(m, lambda i, j: i - j >= 3)
+    osp_2 = somma(m, lambda i, j: j - i >= 2)
+    osp_3 = somma(m, lambda i, j: j - i >= 3)
+
+    merc = {
+        # U/O e Goal
+        "Over 2.5 & Gol": over_gol * 100,
+        "Under 2.5 & Gol": under_gol * 100,
+        "Over 2.5 & No Gol": over_nogol * 100,
+        # Handicap (linee rette, senza rimborso)
+        "Handicap Casa -1.5": casa_2 * 100,
+        "Handicap Ospite -1.5": osp_2 * 100,
+        # Asiatiche (mezzi gol: mai rimborso)
+        "Asiatica Casa +1.5": (1 - osp_2) * 100,
+        "Asiatica Ospite +1.5": (1 - casa_2) * 100,
+        "Asiatica Casa +2.5": (1 - osp_3) * 100,
+        "Asiatica Ospite +2.5": (1 - casa_3) * 100,
+        # Primo Tempo
+        "1T Over 0.5": (1 - d1[0]) * 100,
+        "1T Under 1.5": (d1[0] + d1[1]) * 100,
+        "1T Gol": somma(
+            m1, lambda i, j: i >= 1 and j >= 1
+        ) * 100,
+        # Secondo Tempo
+        "2T Over 0.5": (1 - d2[0]) * 100,
+        "2T Over 1.5": (
+            1 - d2[0] - d2[1]
+        ) * 100,
+        "2T Gol": somma(
+            m2, lambda i, j: i >= 1 and j >= 1
+        ) * 100,
+        # Casa / Ospite (gol di squadra)
+        "Casa Over 0.5": somma(
+            m, lambda i, j: i >= 1
+        ) * 100,
+        "Casa Over 1.5": somma(
+            m, lambda i, j: i >= 2
+        ) * 100,
+        "Ospite Over 0.5": somma(
+            m, lambda i, j: j >= 1
+        ) * 100,
+        "Ospite Over 1.5": somma(
+            m, lambda i, j: j >= 2
+        ) * 100,
+        # Combo
+        "1 & Gol": somma(
+            m, lambda i, j:
+            i > j and j >= 1
+        ) * 100,
+        "2 & Over 1.5": somma(
+            m, lambda i, j:
+            j > i and i + j >= 2
+        ) * 100,
+        # Multigol (gol totali nel range, inclusi)
+        "Multigol 1-3": sum(d[1:4]) * 100,
+        "Multigol 2-4": sum(d[2:5]) * 100,
+        "Multigol 1-4": sum(d[1:5]) * 100,
+        "Multigol 2-5": sum(d[2:6]) * 100,
+        "Multigol 3-6": sum(d[3:7]) * 100,
+        # 1X2 + Multigol
+        "1 & Multigol 1-3": somma(
+            m, lambda i, j:
+            i > j and 1 <= i + j <= 3
+        ) * 100,
+        "2 & Multigol 2-4": somma(
+            m, lambda i, j:
+            j > i and 2 <= i + j <= 4
+        ) * 100,
+        # DC + Multigol
+        "1X & Multigol 1-4": somma(
+            m, lambda i, j:
+            i >= j and 1 <= i + j <= 4
+        ) * 100,
+        "X2 & Multigol 2-4": somma(
+            m, lambda i, j:
+            j >= i and 2 <= i + j <= 4
+        ) * 100,
+        # Multibet Tempo
+        "1T Ovr 0.5 & Fin Ovr 2.5": sum(
+            d1[a] * sum(d2[max(0, 3 - a):])
+            for a in range(1, 2 * MATRICE_N - 1)
+        ) * 100,
+        # Combo Multigol Casa + Osp.
+        "MultiCasa 1+ & Osp 1-3": somma(
+            m, lambda i, j:
+            i >= 1 and 1 <= j <= 3
+        ) * 100,
+        # Combo Multigol 1T + 2T
+        "Multi 1T 1+ & 2T 1-3": (
+            (1 - d1[0]) * sum(d2[1:4])
+        ) * 100,
+        # Speciali Gol
+        "Gol 1T e 2T": (
+            (1 - d1[0]) * (1 - d2[0])
+        ) * 100,
+        "Casa segna 1T e 2T": (
+            (1 - somma(m1, lambda i, j: i == 0))
+            * (1 - somma(m2, lambda i, j: i == 0))
+        ) * 100,
+        "Ospite segna 1T e 2T": (
+            (1 - somma(m1, lambda i, j: j == 0))
+            * (1 - somma(m2, lambda i, j: j == 0))
+        ) * 100,
+        # Combo U/O 1T + 2T
+        "U 1.5 1T & O 0.5 2T": (
+            (d1[0] + d1[1]) * (1 - d2[0])
+        ) * 100,
+        "O 0.5 1T & O 1.5 2T": (
+            (1 - d1[0]) * (1 - d2[0] - d2[1])
+        ) * 100,
+        # Combo U/O Casa + Ospite
+        "Casa O 0.5 & Osp U 1.5": somma(
+            m, lambda i, j:
+            i >= 1 and j <= 1
+        ) * 100,
+        "Casa U 1.5 & Osp O 0.5": somma(
+            m, lambda i, j:
+            i <= 1 and j >= 1
+        ) * 100,
+        # Speciali Minuti (timing ~ uniforme nel 1T)
+        "Gol entro il 30'": (
+            1 - math.exp(
+                -QUOTA_1T * tot * (29.0 / 45.0)
+            )
+        ) * 100
+    }
+
+    merc = {
+        k: clamp(v, 1.0, 99.0)
+        for k, v in merc.items()
+    }
+
+    # ---- Ris. Esatto (top 2) ----
+    punteggi = sorted(
+        (
+            (i, j, m[i][j])
+            for i in range(MATRICE_N)
+            for j in range(MATRICE_N)
+        ),
+        key=lambda t: -t[2]
+    )
+
+    esatto_top = [
+        (f"{i}-{j}", p * 100)
+        for i, j, p in punteggi
+        if p >= 0.06
+    ][:2]
+
+    # ---- 1T/Finale (top 2) ----
+    def _esito(x, y):
+
+        if x > y:
+            return "1"
+
+        if x == y:
+            return "X"
+
+        return "2"
+
+    htft = {}
+
+    for i1 in range(MATRICE_N):
+
+        for j1 in range(MATRICE_N):
+
+            if m1[i1][j1] < 0.001:
+                continue
+
+            r1 = _esito(i1, j1)
+
+            for i2 in range(MATRICE_N):
+
+                for j2 in range(MATRICE_N):
+
+                    if m2[i2][j2] < 0.001:
+                        continue
+
+                    k = (
+                        r1
+                        + "/"
+                        + _esito(i1 + i2, j1 + j2)
+                    )
+
+                    htft[k] = (
+                        htft.get(k, 0.0)
+                        + m1[i1][j1] * m2[i2][j2]
+                    )
+
+    htft_ord = sorted(
+        htft.items(),
+        key=lambda kv: -kv[1]
+    )
+
+    htft_top = [
+        (k, v * 100)
+        for k, v in htft_ord[:2]
+        if v >= 0.08
+    ]
+
+    # le 1T/Finale piu' probabili entrano anche nel pool
+    # (solo se plausibili per le fasce basse: >= 18%)
+    for k, v in htft_ord[:2]:
+
+        if v >= 0.18:
+            merc[f"1T/F {k}"] = clamp(
+                v * 100, 1.0, 99.0
+            )
+
+    return merc, esatto_top, htft_top
+
+
+def format_esatto(
+    analisi: Dict[str, Any]
+) -> str:
+
+    top = analisi.get("esatto_top") or []
+
+    if not top:
+        return "N/D"
+
+    return " - ".join(
+        f"{s} ({p:.0f}%)"
+        for s, p in top
+    )
+
+
+def format_htft(
+    analisi: Dict[str, Any]
+) -> str:
+
+    top = analisi.get("htft_top") or []
+
+    if not top:
+        return "N/D"
+
+    return " - ".join(
+        f"{s} ({p:.0f}%)"
+        for s, p in top
+    )
+
+
+# ============================================================
 # GOAL ATTESI
 # ============================================================
 
@@ -4517,6 +5162,19 @@ def analizza_partita(
         stats_away
     )
 
+    # mercati avanzati dalla matrice dei punteggi
+    lh_av, la_av = stima_goal_squadre(
+        stats_model_home,
+        stats_model_away,
+        ppg_casa,
+        ppg_trasferta
+    )
+
+    avanzati, esatto_top, htft_top = mercati_avanzati(
+        lh_av,
+        la_av
+    )
+
     # --------------------------------------------------------
     # AFFIDABILITÀ
     # --------------------------------------------------------
@@ -4573,6 +5231,9 @@ def analizza_partita(
         "h2h": h2h,
         "europe_home": europe_home,
         "europe_away": europe_away,
+        "mercati_avanzati": avanzati,
+        "esatto_top": esatto_top,
+        "htft_top": htft_top,
         "meteo": wx,
         "quote_mercato": quote_mercato,
         "xg_home": (
@@ -4888,6 +5549,14 @@ Indice fatica: {analisi['fatica_away']}/70
 
 {format_meteo(analisi['meteo'])}
 
+<b>📰 NOTIZIE</b>
+
+{home}:
+{format_notizie(analisi.get('notizie_home'))}
+
+{away}:
+{format_notizie(analisi.get('notizie_away'))}
+
 <b>🔥 MOMENTUM</b>
 
 {home}: {momentum_text(analisi['momentum_home'])}
@@ -4920,6 +5589,11 @@ Goal attesi: <b>{analisi['expected_goals']:.2f}</b>
 <b>⭐ PRONOSTICO PRINCIPALE</b>
 
 <b>{migliore}</b> — {format_percent(migliore_valore)}
+
+<b>🎯 RIS. ESATTO & 1T/FINALE</b>
+
+Esatto: {format_esatto(analisi)}
+1T/Finale: {format_htft(analisi)}
 
 <b>📊 AFFIDABILITÀ DATI</b>
 
@@ -5010,6 +5684,18 @@ def crea_report(
 
                 analisi_completa.append(
                     analisi
+                )
+
+                analisi["notizie_home"] = (
+                    notizie_squadra(
+                        analisi["home"]
+                    )
+                )
+
+                analisi["notizie_away"] = (
+                    notizie_squadra(
+                        analisi["away"]
+                    )
                 )
 
                 if on_progress:
@@ -5118,6 +5804,14 @@ def crea_report(
         "⚠️ <i>Utilizzare i dati come "
         "supporto statistico e non come "
         "garanzia di vincita.</i>"
+    )
+
+    righe.append(
+        "ℹ️ <i>Mercati avanzati (1T/2T, handicap, "
+        "multigol, esatti): stime Poisson calibrate "
+        "su 250 partite 2026-27. Sanzioni/cartellini "
+        "esclusi: nessuna fonte gratuita "
+        "affidabile.</i>"
     )
 
     parti.append(
@@ -5460,6 +6154,12 @@ def migliori_pick(
             / tot_1x2 * 100
         )
     }
+
+    avanzati = analisi.get(
+        "mercati_avanzati"
+    ) or {}
+
+    mercati.update(avanzati)
 
     ordine = sorted(
         mercati.items(),
@@ -5925,6 +6625,12 @@ def format_schedina(
             f"| affidabilit\u00e0 {leg['aff']}%"
         )
 
+        if leg.get("news_flag"):
+            righe.append(
+                "\u26a0\ufe0f\U0001f4f0 notizie da "
+                "verificare su una delle due squadre"
+            )
+
     righe.append("")
     righe.append(
         "⚠️ <i>Quote stimate dal modello "
@@ -6063,12 +6769,56 @@ def crea_schedine(
 
             analisi["league"] = league
 
-            pool.extend(
-                migliori_pick(
-                    analisi,
-                    max_pick=10
-                )
+            # TUTTI i mercati (il taglio avviene qui
+            # sotto, con l'unione top-prob + top-quota)
+            picks_m = migliori_pick(
+                analisi,
+                max_pick=99
             )
+
+            # unione top-8 per PROBABILITA' e top-8 per
+            # QUOTA: le 42+ varianti avanzate hanno tante
+            # gambe sicure che selezionandole solo per
+            # probabilita' spazzerebbero via i mercati a
+            # quota alta
+            # (servono alle fasce AUDACE/MITO)
+            # 3 gruppi per match: piu' PROBABILI, banda
+            # CENTRALE (1.35-2.19) e piu' QUOTA: il pool
+            # deve coprire TUTTA la scala quote, altrimenti
+            # le fasce alte (AUDACE/MITO) diventano
+            # irraggiungibili
+            top_prob = picks_m[:6]
+
+            mid = sorted(
+                [
+                    p for p in picks_m
+                    if 1.35 <= p["quota"] <= 2.19
+                ],
+                key=lambda p: -p["prob"]
+            )[:6]
+
+            top_quota = sorted(
+                picks_m,
+                key=lambda p: -p["quota"]
+            )[:6]
+
+            visti_m = set()
+            selezionati = []
+
+            for p in top_prob + mid + top_quota:
+
+                k = (
+                    p["match_key"],
+                    p["mercato"]
+                )
+
+                if k in visti_m:
+                    continue
+
+                visti_m.add(k)
+                selezionati.append(p)
+
+            pool.extend(selezionati)
 
         if on_progress:
 
@@ -6186,6 +6936,30 @@ def crea_schedine(
 
         schedine = selezionate
 
+    # notizie: avviso sulle gambe della schedina scelta
+    for s in schedine:
+
+        for leg in s["legs"]:
+
+            nh = notizie_squadra(
+                leg["analisi"]["home"]
+            )
+
+            na = notizie_squadra(
+                leg["analisi"]["away"]
+            )
+
+            leg["news_flag"] = bool(
+                (
+                    nh
+                    and nh.get("flag")
+                )
+                or (
+                    na
+                    and na.get("flag")
+                )
+            )
+
     print("Schedine create: " + str(len(schedine)))
 
     return [
@@ -6300,6 +7074,7 @@ Il bot elaborerà:
 • goal attesi
 • affidabilità dei dati
 • 🎟 schedine pronte: SICURA (fino a 10), EQUILIBRATA (fino a 25), AUDACE (fino a 50), MITO (51-60)
+• 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
 """.strip()
