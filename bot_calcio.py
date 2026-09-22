@@ -219,11 +219,6 @@ SOTTOMENU = {
                 "espn": "uefa.nations",
                 "nome": "UEFA Nations League",
                 "btn": "🌍 Nations League"
-            },
-            {
-                "espn": "fifa.friendly",
-                "nome": "Amichevoli internazionali",
-                "btn": "🤝 Amichevoli"
             }
         ]
     },
@@ -3128,13 +3123,72 @@ def _fduk_url_stagione(league: str) -> str:
     )
 
 
+# Alias nazionali: ESPN e The Odds API usano nomi inglesi
+# (Italy, Netherlands...), questa mappa copre anche varianti
+# italiane/locali per il match robusto delle quote
+NAZIONALI_ALIAS = {
+    "italia": "italy",
+    "francia": "france",
+    "germania": "germany",
+    "spagna": "spain",
+    "inghilterra": "england",
+    "olanda": "netherlands",
+    "holland": "netherlands",
+    "paesi bassi": "netherlands",
+    "belgio": "belgium",
+    "portogallo": "portugal",
+    "croazia": "croatia",
+    "danimarca": "denmark",
+    "svezia": "sweden",
+    "norvegia": "norway",
+    "svizzera": "switzerland",
+    "polonia": "poland",
+    "repubblica ceca": "czech republic",
+    "czechia": "czech republic",
+    "turchia": "turkey",
+    "turkiye": "turkey",
+    "ungheria": "hungary",
+    "grecia": "greece",
+    "scozia": "scotland",
+    "galles": "wales",
+    "irlanda del nord": "northern ireland",
+    "israele": "israel",
+    "finlandia": "finland",
+    "islanda": "iceland",
+    "ucraina": "ukraine",
+    "bielorussia": "belarus",
+    "macedonia del nord": "north macedonia",
+    "lussemburgo": "luxembourg",
+    "stati uniti": "united states",
+    "brasile": "brazil",
+    "cile": "chile",
+    "messico": "mexico",
+    "giappone": "japan",
+    "marocco": "morocco",
+    "egitto": "egypt",
+    "camerun": "cameroon",
+    "costa d avorio": "ivory coast",
+    "arabia saudita": "saudi arabia",
+    "corea del sud": "south korea",
+    "sud africa": "south africa",
+    "bosnia ed erzegovina": "bosnia and herzegovina",
+    "slovacchia": "slovakia",
+    "lettonia": "latvia",
+    "lituania": "lithuania"
+}
+
+
 def _fduk_matcha(nome_espn: str, nome_csv: str) -> bool:
 
     a = normalizza_nome(nome_espn)
 
     a = FDUK_ALIAS.get(a, a)
 
+    a = NAZIONALI_ALIAS.get(a, a)
+
     b = normalizza_nome(nome_csv)
+
+    b = NAZIONALI_ALIAS.get(b, b)
 
     return (
         a == b
@@ -5155,6 +5209,27 @@ def analizza_partita(
         )
     )
 
+    # fallback: quote REALI da The Odds API (se
+    # configurata la chiave) per competizioni senza
+    # CSV fduk (nazionali, coppe) o quando fduk non
+    # ha ancora pubblicato le quote del turno
+    if quote_mercato is None:
+
+        sport_odds = ODDS_API_SPORT.get(
+            league
+        )
+
+        if sport_odds:
+
+            quote_mercato = (
+                odds_api_per_partita(
+                    sport_odds,
+                    home_name,
+                    away_name,
+                    data_evento
+                )
+            )
+
 
 
 
@@ -5414,6 +5489,287 @@ def format_europa(
     )
 
 
+# ============================================================
+# QUOTE REALI DA THE ODDS API (opzionale, chiave env)
+#
+# football-data.co.uk pubblica quote reali solo per i 5
+# campionati club e pochi giorni prima del turno. Per
+# nazionali (Nations League) e coppe (Champions, Europa,
+# Conference) -- e per i club in attesa di pubblicazione --
+# se e' configurata la variabile env THE_ODDS_API_KEY
+# (gratuita su the-odds-api.com, 500 crediti/mese) il bot
+# usa le quote REALI dei bookmaker (la migliore tra le
+# piattaforme EU) nello stesso identico flusso dei club:
+# quota "(reale X.XX)" nelle gambe e ⭐ se il modello
+# trova valore rispetto al mercato.
+# Costo: 2 crediti per competizione per chiamata
+# (h2h + totals, regione eu), cache 2h / negativa 30min.
+# Senza chiave: tutto funziona come prima (quote stimate).
+# ============================================================
+
+THE_ODDS_API_KEY = os.getenv(
+    "THE_ODDS_API_KEY",
+    ""
+).strip()
+
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+
+ODDS_API_SPORT = {
+    "uefa.nations": (
+        "soccer_uefa_nations_league"
+    ),
+    "uefa.champions": (
+        "soccer_uefa_champions_league"
+    ),
+    "uefa.europa": (
+        "soccer_uefa_europa_league"
+    ),
+    "uefa.europa.conf": (
+        "soccer_uefa_europa_conference_league"
+    ),
+    "ita.1": "soccer_italy_serie_a",
+    "eng.1": "soccer_epl",
+    "esp.1": "soccer_spain_la_liga",
+    "ger.1": "soccer_germany_bundesliga",
+    "fra.1": "soccer_france_ligue_one"
+}
+
+
+def _odds_api_eventi(
+    sport: str
+) -> Optional[List[Dict[str, Any]]]:
+
+    """Elenco eventi con quote (h2h + totals, migliori
+    bookmaker EU) per la competizione. Cache 2h,
+    negativa 30 min. None se chiave assente/errore."""
+
+    if not THE_ODDS_API_KEY:
+        return None
+
+    cache_key = f"oddsapi_{sport}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    try:
+
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{sport}/odds",
+            params={
+                "apiKey": THE_ODDS_API_KEY,
+                "regions": "eu",
+                "markets": "h2h,totals",
+                "oddsFormat": "decimal"
+            },
+            timeout=10
+        )
+
+        if r.status_code != 200:
+
+            print(
+                f"\u26a0\ufe0f Odds API {sport}: "
+                f"HTTP {r.status_code}"
+            )
+
+            cache_set(cache_key, -1, 1800)
+
+            return None
+
+        eventi = r.json() or []
+
+        cache_set(cache_key, eventi, 7200)
+
+        return eventi
+
+    except Exception as exc:
+
+        print(f"\u26a0\ufe0f Odds API {sport}: {exc}")
+
+        cache_set(cache_key, -1, 1800)
+
+        return None
+
+
+def _odds_api_migliori(
+    evento: Dict[str, Any]
+) -> Dict[str, float]:
+
+    """Migliore quota decimale per ogni esito tra
+    tutti i bookmaker dell'evento. Solo linea
+    Over/Under 2.5 per i totals."""
+
+    best: Dict[str, float] = {}
+
+    for book in (
+        evento.get("bookmakers") or []
+    ):
+
+        for market in (
+            book.get("markets") or []
+        ):
+
+            mk = market.get("key")
+
+            for out in (
+                market.get("outcomes") or []
+            ):
+
+                nome = str(
+                    out.get("name", "")
+                )
+
+                prezzo = safe_float(
+                    out.get("price")
+                )
+
+                if not prezzo or prezzo <= 1:
+                    continue
+
+                if mk == "h2h":
+
+                    chiave = {
+                        "Home": "q1",
+                        "Draw": "qx",
+                        "Away": "q2"
+                    }.get(nome)
+
+                elif mk == "totals":
+
+                    punto = safe_float(
+                        out.get("point")
+                    )
+
+                    if (
+                        punto is None
+                        or abs(punto - 2.5) > 0.01
+                    ):
+                        continue
+
+                    if nome == "Over":
+                        chiave = "over25"
+
+                    elif nome == "Under":
+                        chiave = "under25"
+
+                    else:
+                        chiave = None
+
+                else:
+                    chiave = None
+
+                if not chiave:
+                    continue
+
+                if prezzo > best.get(chiave, 0):
+                    best[chiave] = prezzo
+
+    return best
+
+
+def odds_api_per_partita(
+    sport: str,
+    home_name: str,
+    away_name: str,
+    data_evento: Any
+) -> Optional[Dict[str, Any]]:
+
+    """Quote reali del match (se presente nell'elenco
+    della competizione) nello stesso formato di
+    quote_mercato_per_partita. Match per nome squadre
+    (fuzzy) + orario within 20h."""
+
+    eventi = _odds_api_eventi(sport)
+
+    if not eventi:
+        return None
+
+    if isinstance(
+        data_evento,
+        datetime
+    ):
+
+        t_evento = data_evento
+
+        if t_evento.tzinfo is None:
+            t_evento = t_evento.replace(
+                tzinfo=timezone.utc
+            )
+
+    else:
+
+        try:
+
+            t_evento = datetime.fromisoformat(
+                str(data_evento).replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+        except Exception:
+            return None
+
+    for ev in eventi:
+
+        try:
+
+            t_ev = datetime.fromisoformat(
+                str(
+                    ev.get("commence_time", "")
+                ).replace("Z", "+00:00")
+            )
+
+        except Exception:
+            continue
+
+        if abs(
+            (t_ev - t_evento).total_seconds()
+        ) > 20 * 3600:
+            continue
+
+        if not (
+            _fduk_matcha(
+                home_name,
+                str(ev.get("home_team", ""))
+            )
+            and _fduk_matcha(
+                away_name,
+                str(ev.get("away_team", ""))
+            )
+        ):
+            continue
+
+        best = _odds_api_migliori(ev)
+
+        if (
+            best.get("q1")
+            and best.get("qx")
+            and best.get("q2")
+        ):
+
+            return {
+                "q1": best["q1"],
+                "qx": best["qx"],
+                "q2": best["q2"],
+                "over25": best.get(
+                    "over25"
+                ),
+                "under25": best.get(
+                    "under25"
+                ),
+                "data_csv": None,
+                "fonte": "the-odds-api"
+            }
+
+    return None
+
+
 def format_quote_mercato(
     q: Optional[Dict[str, Any]]
 ) -> str:
@@ -5453,6 +5809,13 @@ def format_quote_mercato(
             f"Over/Under 2.5 reali: "
             f"{q['over25']:.2f} / "
             f"{q['under25']:.2f}"
+        )
+
+    if q.get("fonte") == "the-odds-api":
+
+        righe.append(
+            "Fonte: migliori quote bookmaker "
+            "EU (The Odds API)"
         )
 
     return "\n".join(righe)
@@ -8115,6 +8478,17 @@ def worker_aggiornamenti():
                     "elaborato."
                 )
 
+            else:
+
+                print(
+                    "\u26a0\ufe0f Update non "
+                    "valido (de_json None): "
+                    + body[:200].decode(
+                        "utf-8",
+                        "ignore"
+                    )
+                )
+
         except Exception as exc:
 
             print(
@@ -8285,7 +8659,7 @@ def _webhook_raggiungibile() -> bool:
     try:
 
         response = requests.get(
-            WEBHOOK_URL
+            RENDER_EXTERNAL_URL
             + "/health",
             timeout=10
         )
