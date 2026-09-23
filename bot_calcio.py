@@ -6755,12 +6755,12 @@ def _mito_estesa(
     picks_ordinate: List[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
 
-    """MITO sotto 53: aggiunge GAMBE (fino a 8 totali)
-    scegliendo tra i mercati piu' probabili che portano
-    la quota nella finestra [53, cap] senza superarla.
-    Preferisce sempre la gamba a probabilita' piu' alta
-    che chiude la schedina in fascia; altrimenti la piu'
-    probabile che avvicina al pavimento."""
+    """MITO a 8 GAMBE (o piu', fino a 10): parte dalla
+    combinazione migliore (4-6) e aggiunge le gambe a
+    piu' alta probabilita' che non fanno superare il
+    cap; se dopo le 8 gambe la quota resta sotto 53
+    continua fino a 10 per chiudere nella finestra
+    [floor, cap]. Mai due eventi della stessa partita."""
 
     legs = list(combo)
 
@@ -6770,7 +6770,9 @@ def _mito_estesa(
 
     q = quota_tot
 
-    while q < 53.0 and len(legs) < 8:
+    def _aggiungi(condizione) -> bool:
+
+        nonlocal q
 
         candidati_g = [
             p for p in picks_ordinate
@@ -6778,50 +6780,18 @@ def _mito_estesa(
             >= tier["prob_min"]
             and p["match_key"]
             not in usati
-            and p["quota"] * q
+            and q * p["quota"]
             <= tier["cap"]
+            and condizione(p)
         ]
 
         if not candidati_g:
-            break
+            return False
 
-        # prima chi CHIUDE in fascia [53, cap]
-        chiusura = [
-            p for p in candidati_g
-            if p["quota"] * q >= 53.0
-        ]
-
-        if chiusura:
-
-            # tra le gambe che chiudono in fascia
-            # preferisce quella che porta la quota
-            # vicino al centro della finestra (~56.5):
-            # quota piu' ricca con probabilita' alta
-            scelta = min(
-                chiusura,
-                key=lambda p: abs(
-                    p["quota"] * q - 56.5
-                )
-            )
-
-        else:
-
-            # avvicina al pavimento: la gamba
-            # piu' probabile tra quelle che
-            # lasciano spazio ad almeno un'altra
-            passo = [
-                p for p in candidati_g
-                if p["quota"] * q
-                >= 53.0 / 2.0
-            ]
-
-            if not passo:
-                break
-
-            scelta = max(
-                passo,
-                key=lambda p: p["prob"]
-            )
+        scelta = max(
+            candidati_g,
+            key=lambda p: p["prob"]
+        )
 
         legs.append(scelta)
 
@@ -6831,7 +6801,31 @@ def _mito_estesa(
 
         q *= scelta["quota"]
 
-    if q < 53.0:
+        return True
+
+    # 1) porta la schedina a 8 gambe con le
+    #    aggiunte piu' probabili possibili
+    while len(legs) < 8:
+
+        if not _aggiungi(
+            lambda p: True
+        ):
+            break
+
+    # 2) se resta sotto 53, altre gambe
+    #    (max 10) mirando alla finestra
+    while q < 53.0 and len(legs) < 10:
+
+        if not _aggiungi(
+            lambda p: p["quota"] * q >= 53.0
+        ):
+
+            if not _aggiungi(
+                lambda p: p["quota"] * q >= 26.5
+            ):
+                break
+
+    if q < tier["floor"]:
         return None
 
     aff_media = sum(
@@ -7028,7 +7022,7 @@ def costruisci_schedina(
     # se non esiste nulla di meglio resta questa.
     if (
         tier["cap"] >= 59.5
-        and quota_tot < 53.0
+        and len(combo) < 8
         and tier["max_legs"] <= 6
     ):
 
