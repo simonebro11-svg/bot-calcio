@@ -6748,6 +6748,121 @@ TIERS_SCHEDINE = [
 ]
 
 
+def _mito_estesa(
+    tier: Dict[str, Any],
+    combo: List[Dict[str, Any]],
+    quota_tot: float,
+    picks_ordinate: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+
+    """MITO sotto 53: aggiunge GAMBE (fino a 8 totali)
+    scegliendo tra i mercati piu' probabili che portano
+    la quota nella finestra [53, cap] senza superarla.
+    Preferisce sempre la gamba a probabilita' piu' alta
+    che chiude la schedina in fascia; altrimenti la piu'
+    probabile che avvicina al pavimento."""
+
+    legs = list(combo)
+
+    usati = {
+        p["match_key"] for p in legs
+    }
+
+    q = quota_tot
+
+    while q < 53.0 and len(legs) < 8:
+
+        candidati_g = [
+            p for p in picks_ordinate
+            if p["prob"] / 100.0
+            >= tier["prob_min"]
+            and p["match_key"]
+            not in usati
+            and p["quota"] * q
+            <= tier["cap"]
+        ]
+
+        if not candidati_g:
+            break
+
+        # prima chi CHIUDE in fascia [53, cap]
+        chiusura = [
+            p for p in candidati_g
+            if p["quota"] * q >= 53.0
+        ]
+
+        if chiusura:
+
+            # tra le gambe che chiudono in fascia
+            # preferisce quella che porta la quota
+            # vicino al centro della finestra (~56.5):
+            # quota piu' ricca con probabilita' alta
+            scelta = min(
+                chiusura,
+                key=lambda p: abs(
+                    p["quota"] * q - 56.5
+                )
+            )
+
+        else:
+
+            # avvicina al pavimento: la gamba
+            # piu' probabile tra quelle che
+            # lasciano spazio ad almeno un'altra
+            passo = [
+                p for p in candidati_g
+                if p["quota"] * q
+                >= 53.0 / 2.0
+            ]
+
+            if not passo:
+                break
+
+            scelta = max(
+                passo,
+                key=lambda p: p["prob"]
+            )
+
+        legs.append(scelta)
+
+        usati.add(
+            scelta["match_key"]
+        )
+
+        q *= scelta["quota"]
+
+    if q < 53.0:
+        return None
+
+    aff_media = sum(
+        p["aff"] for p in legs
+    ) / len(legs)
+
+    prob_combinata = (
+        100.0
+        * math.prod(
+            p["prob"] / 100.0
+            for p in legs
+        )
+    )
+
+    return {
+        "tier": tier,
+        "legs": legs,
+        "quota_tot": round(
+            q,
+            2
+        ),
+        "aff_media": round(
+            aff_media
+        ),
+        "prob_combinata": round(
+            prob_combinata,
+            1
+        )
+    }
+
+
 def costruisci_schedina(
     tier: Dict[str, Any],
     picks_ordinate: List[Dict[str, Any]]
@@ -6906,6 +7021,26 @@ def costruisci_schedina(
         return None
 
     combo, quota_tot = best
+
+    # MITO: se la combinazione migliore resta sul
+    # pavimento (~50) si ripete la ricerca con piu'
+    # GAMBE (7-8) per spingere la quota in [53, cap];
+    # se non esiste nulla di meglio resta questa.
+    if (
+        tier["cap"] >= 59.5
+        and quota_tot < 53.0
+        and tier["max_legs"] <= 6
+    ):
+
+        estesa = _mito_estesa(
+            tier,
+            combo,
+            quota_tot,
+            picks_ordinate
+        )
+
+        if estesa:
+            return estesa
 
     aff_media = sum(
         p["aff"] for p in combo
