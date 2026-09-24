@@ -6755,96 +6755,181 @@ def _mito_estesa(
     picks_ordinate: List[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
 
-    """MITO a 8 GAMBE (o piu', fino a 10): parte dalla
-    combinazione migliore (4-6) e aggiunge le gambe a
-    piu' alta probabilita' che non fanno superare il
-    cap; se dopo le 8 gambe la quota resta sotto 53
-    continua fino a 10 per chiudere nella finestra
-    [floor, cap]. Mai due eventi della stessa partita."""
+    """MITO a 8 GAMBE garantite. Con 8 gambe la quota
+    media per gamba deve essere ~2.1 per superare il
+    pavimento 50: servono gambe GROSSE (2-4.5), non
+    solo quelle economiche. Per ogni partita del pool
+    considero la gamba economica + la grossa + la piu'
+    probabile, scelgo le 20 partite piu' utili e cerco
+    le combinazioni di 8 (partite distinte) con quota
+    in [floor, cap] massimizzando la probabilita'.
+    Se matematicamente impossibile (pool corto o
+    quote tutte piccole) restituisce None."""
 
-    legs = list(combo)
+    filtrati = [
+        p for p in picks_ordinate
+        if p["prob"] / 100.0
+        >= tier["prob_min"]
+    ]
 
-    usati = {
-        p["match_key"] for p in legs
-    }
+    # per ogni partita: gamba economica + grossa
+    # (max quota, serve a raggiungere 50+) + la
+    # piu' probabile
+    by_match: Dict[str, List[Dict[str, Any]]] = {}
 
-    q = quota_tot
+    for p in filtrati:
 
-    def _aggiungi(condizione) -> bool:
+        by_match.setdefault(
+            p["match_key"], []
+        ).append(p)
 
-        nonlocal q
+    per_match: Dict[
+        str, List[Dict[str, Any]]
+    ] = {}
 
-        candidati_g = [
-            p for p in picks_ordinate
-            if p["prob"] / 100.0
-            >= tier["prob_min"]
-            and p["match_key"]
-            not in usati
-            and q * p["quota"]
-            <= tier["cap"]
-            and condizione(p)
-        ]
+    for mk, lista in (
+        by_match.items()
+    ):
 
-        if not candidati_g:
-            return False
+        scelte = []
 
-        scelta = max(
-            candidati_g,
+        economica = min(
+            lista,
+            key=lambda p: p["quota"]
+        )
+
+        scelte.append(economica)
+
+        grossa = max(
+            lista,
+            key=lambda p: p["quota"]
+        )
+
+        if (
+            grossa is not economica
+            and grossa["quota"] <= 6.0
+        ):
+
+            scelte.append(grossa)
+
+        probabile = max(
+            lista,
             key=lambda p: p["prob"]
         )
 
-        legs.append(scelta)
+        if probabile not in scelte:
+            scelte.append(probabile)
 
-        usati.add(
-            scelta["match_key"]
+        per_match[mk] = scelte
+
+    # selezione delle partite piu' utili: le 10 con
+    # la gamba economica piu' bassa (fattibilita')
+    # + le 10 con la gamba grossa piu' alta
+    # (raggiungimento della fascia 50-60)
+    ord_econ = sorted(
+        per_match.keys(),
+        key=lambda mk: min(
+            p["quota"]
+            for p in per_match[mk]
         )
+    )[:10]
 
-        q *= scelta["quota"]
+    ord_grossa = sorted(
+        per_match.keys(),
+        key=lambda mk: -max(
+            p["quota"]
+            for p in per_match[mk]
+        )
+    )[:10]
 
-        return True
+    visti_m2 = set()
+    match_keys = []
 
-    # 1) porta la schedina a 8 gambe con le
-    #    aggiunte piu' probabili possibili
-    while len(legs) < 8:
+    for mk in ord_econ + ord_grossa:
 
-        if not _aggiungi(
-            lambda p: True
+        if mk in visti_m2:
+            continue
+
+        visti_m2.add(mk)
+        match_keys.append(mk)
+
+    if len(match_keys) < 8:
+        return None
+
+    best = None
+    best_score = None
+
+    # prima prova a chiudere nella parte alta della
+    # finestra (>= 53), poi scende al pavimento
+    for soglia in (53.0, tier["floor"]):
+
+        for otto in itertools.combinations(
+            match_keys,
+            8
         ):
+
+            # tutte le combinazioni di gambe (1-3
+            # per partita) delle 8 partite scelte
+            for quote in itertools.product(
+                *[
+                    per_match[mk]
+                    for mk in otto
+                ]
+            ):
+
+                quota_tot8 = 1.0
+
+                for p in quote:
+
+                    quota_tot8 *= p["quota"]
+
+                if quota_tot8 > tier["cap"]:
+                    continue
+
+                if quota_tot8 < soglia:
+                    continue
+
+                score = 0.0
+
+                for p in quote:
+
+                    score += math.log(
+                        p["prob"] / 100.0
+                    )
+
+                if (
+                    best_score is None
+                    or score > best_score
+                ):
+
+                    best_score = score
+                    best = list(quote)
+
+        if best:
             break
 
-    # 2) se resta sotto 53, altre gambe
-    #    (max 10) mirando alla finestra
-    while q < 53.0 and len(legs) < 10:
-
-        if not _aggiungi(
-            lambda p: p["quota"] * q >= 53.0
-        ):
-
-            if not _aggiungi(
-                lambda p: p["quota"] * q >= 26.5
-            ):
-                break
-
-    if q < tier["floor"]:
+    if not best:
         return None
 
     aff_media = sum(
-        p["aff"] for p in legs
-    ) / len(legs)
+        p["aff"] for p in best
+    ) / len(best)
 
     prob_combinata = (
         100.0
         * math.prod(
             p["prob"] / 100.0
-            for p in legs
+            for p in best
         )
     )
 
     return {
         "tier": tier,
-        "legs": legs,
+        "legs": best,
         "quota_tot": round(
-            q,
+            math.prod(
+                p["quota"] for p in best
+            ),
             2
         ),
         "aff_media": round(
@@ -9027,7 +9112,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO: 8 gambe (fino a 10) - build 25 set 2026"
+        "\U0001f4a3 MITO: 8 gambe fisse - build 25 set 2026 v2"
     )
 
     print(
