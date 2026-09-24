@@ -9153,7 +9153,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO 8 gambe + keep-alive + check token - build 25 set 2026 v4"
+        "\U0001f4a3 MITO 8 gambe + webhook persistente - build 25 set 2026 v5"
     )
 
     print(
@@ -9286,10 +9286,15 @@ def main():
 
     finally:
 
-        try:
-            bot.remove_webhook()
-        except Exception:
-            pass
+        # MAI remove_webhook allo spegnimento: sul piano
+        # gratuito Render addormenta il servizio dopo ~15
+        # minuti; se il webhook viene cancellato qui,
+        # Telegram perde l'indirizzo e i messaggi restano
+        # in coda senza mai svegliare il server
+        # (sintomo: bot "morto" finche' non si riapre il
+        # sito manualmente). Il webhook lascato registrato
+        # permette a Telegram di riattivare il servizio;
+        # l'avvio richiama comunque remove+set puliti.
 
         try:
             server.shutdown()
