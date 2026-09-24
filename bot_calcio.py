@@ -142,7 +142,48 @@ if not TELEGRAM_BOT_TOKEN:
         "TELEGRAM_BOT_TOKEN non configurato nelle Environment Variables."
     )
 
-print("TELEGRAM_BOT_TOKEN: OK")
+# verifica REALE del token presso Telegram (getMe):
+# la sola presenza della variabile NON garantisce che
+# il token sia ancora valido (puo' essere revocato da
+# BotFather o dall'utente stesso)
+try:
+
+    _r_tok = requests.get(
+        "https://api.telegram.org/bot"
+        + TELEGRAM_BOT_TOKEN
+        + "/getMe",
+        timeout=10
+    )
+
+    if _r_tok.status_code == 200:
+
+        _me = (
+            _r_tok.json().get("result", {})
+        )
+
+        print(
+            "\u2705 Token VALIDO: @"
+            + str(_me.get("username"))
+        )
+
+    else:
+
+        print(
+            "\u274c Token NON VALIDO (HTTP "
+            + str(_r_tok.status_code)
+            + "): revocato o sbagliato. "
+            "BotFather /mybots -> API Token -> "
+            "copia quello ATTUALE nella variabile "
+            "TELEGRAM_BOT_TOKEN su Render e redeploy."
+        )
+
+except Exception as _exc_tok:
+
+    print(
+        "\u26a0\ufe0f Token non verificabile "
+        f"ora ({_exc_tok}): continuo lo stesso"
+    )
+
 print("⚽ Dati calcistici: ESPN (endpoint team-schedule ottimizzati)")
 
 
@@ -9112,7 +9153,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO 8 gambe + keep-alive - build 25 set 2026 v3"
+        "\U0001f4a3 MITO 8 gambe + keep-alive + check token - build 25 set 2026 v4"
     )
 
     print(
