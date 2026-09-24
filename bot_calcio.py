@@ -9027,6 +9027,10 @@ def main():
     )
 
     print(
+        "\U0001f4a3 MITO: 8 gambe (fino a 10) - build 25 set 2026"
+    )
+
+    print(
         "Avvio applicazione Render..."
     )
 
