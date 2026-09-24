@@ -9112,7 +9112,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO: 8 gambe fisse - build 25 set 2026 v2"
+        "\U0001f4a3 MITO 8 gambe + keep-alive - build 25 set 2026 v3"
     )
 
     print(
@@ -9158,6 +9158,44 @@ def main():
         f"🌐 Health URL: "
         f"{RENDER_EXTERNAL_URL}/health"
     )
+
+    # --------------------------------------------------------
+    # KEEP-ALIVE: sul piano gratuito Render addormenta il
+    # servizio dopo ~15 minuti di inattivita': il primo
+    # messaggio Telegram va perso mentre il server si
+    # sveglia (~50s). Un ping al proprio /health ogni
+    # 10 minuti tiene il servizio sempre attivo
+    # (disattivabile con la variabile KEEP_ALIVE=0).
+    # --------------------------------------------------------
+
+    if os.getenv("KEEP_ALIVE", "1").strip() != "0":
+
+        def _keep_alive():
+
+            while not _shutdown.is_set():
+
+                try:
+
+                    time.sleep(600)
+
+                    requests.get(
+                        RENDER_EXTERNAL_URL
+                        + "/health",
+                        timeout=10
+                    )
+
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_keep_alive,
+            daemon=True
+        ).start()
+
+        print(
+            "\U0001f493 Keep-alive attivo "
+            "(ping ogni 10 min)"
+        )
 
     # Webhook (con self-check e fallback)
     webhook_ok = (
