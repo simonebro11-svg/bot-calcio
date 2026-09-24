@@ -1196,9 +1196,12 @@ def recupera_partite_future(
         ):
             break
 
-    risultati = eventi[
-        :NUM_PARTITE_REPORT
-    ]
+    # NESSUN taglio qui: le schedine devono poter
+    # considerare TUTTO il turno (es. Nations giocata
+    # su 3 giorni, weekend con 10 partite). Il report
+    # si limita da solo alle prime NUM_PARTITE_REPORT
+    # partite con il proprio taglio interno.
+    risultati = eventi
 
     cache_set(
         cache_key,
@@ -9160,7 +9163,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO 8 gambe + webhook stabile - build 25 set 2026 v6"
+        "\U0001f4a3 MITO 8 gambe + pool turno completo - build 25 set 2026 v7"
     )
 
     print(
