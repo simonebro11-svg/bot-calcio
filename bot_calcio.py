@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import telebot
 from telebot import types
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -40,10 +41,16 @@ WEBHOOK_URL = RENDER_EXTERNAL_URL + WEBHOOK_PATH
 ALLOWED_UPDATES = ["message", "callback_query"]
 
 # Token segreto per autenticare le richieste webhook di Telegram.
-# Se non fornito viene generato al pronto e passato a set_webhook.
+# SECRET STABILE: derivato dal token del bot (stesso valore a
+# ogni riavvio/redeploy). Prima veniva generato a caso ad ogni
+# avvio: in finestra di riavvio Telegram inviava col secret
+# vecchio e il processo nuovo rispondeva 403 Forbidden
+# (visibile in getWebhookInfo come last_error).
 TELEGRAM_SECRET_TOKEN = (
     os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
-    or os.urandom(16).hex()
+    or hashlib.sha256(
+        ("v1:" + os.getenv("TELEGRAM_BOT_TOKEN", "")).encode()
+    ).hexdigest()[:32]
 )
 
 TELEGRAM_BOT_TOKEN = os.getenv(
@@ -9153,7 +9160,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO 8 gambe + webhook persistente - build 25 set 2026 v5"
+        "\U0001f4a3 MITO 8 gambe + webhook stabile - build 25 set 2026 v6"
     )
 
     print(
