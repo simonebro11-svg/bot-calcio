@@ -7403,14 +7403,42 @@ def crea_schedine(
 
     per_lega = []
 
+    def _giornata_singola(partite):
+
+        """Solo la GIORNATA in corso: dal giorno della
+        prima partita + 2 giorni (oggi/domani/dopodomani
+        quando il turno inizia oggi; l'intero weekend
+        quando inizia sabato). Esclude il turno dopo."""
+
+        con_data = [
+            p for p in partite
+            if p.get("_datetime")
+        ]
+
+        if not con_data:
+            return partite
+
+        primo = min(
+            p["_datetime"] for p in con_data
+        ).date()
+
+        limite = primo + timedelta(days=2)
+
+        return [
+            p for p in con_data
+            if p["_datetime"].date() <= limite
+        ]
+
     def _partite(pair):
 
         league = pair[1]["espn"]
 
         try:
             return league, (
-                recupera_partite_future(
-                    league
+                _giornata_singola(
+                    recupera_partite_future(
+                        league
+                    )
                 )
             )
 
@@ -9163,7 +9191,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO 8 gambe + pool turno completo - build 25 set 2026 v7"
+        "\U0001f4a3 MITO 8 gambe + pool giornata singola - build 25 set 2026 v8"
     )
 
     print(
