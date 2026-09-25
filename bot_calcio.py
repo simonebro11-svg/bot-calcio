@@ -8078,6 +8078,12 @@ def migliori_pick(
     return picks
 
 
+# Nessuna gamba (evento) delle schedine puo'
+# avere quota inferiore a questa soglia:
+# le gambe "regalate" (1.01-1.24) gonfiano il
+# numero di eventi senza pagare il rischio.
+QUOTA_GAMBA_MIN = 1.25
+
 TIERS_SCHEDINE = [
     {
         "nome": "🎟 SCHEDINA SICURA",
@@ -8256,6 +8262,13 @@ def costruisci_schedina(
         p for p in picks_ordinate
         if p["prob"] / 100.0
         >= tier["prob_min"]
+    ]
+
+    # gamba troppo economica (< QUOTA_GAMBA_MIN):
+    # fuori da TUTTE le schedine
+    candidati = [
+        p for p in candidati
+        if p["quota"] >= QUOTA_GAMBA_MIN
     ]
 
     # squadre stanche (riposo < 3 giorni) fuori
@@ -8707,6 +8720,14 @@ def crea_schedine(
                 analisi,
                 max_pick=99
             )
+
+            # gambe sotto soglia fuori dal pool: non
+            # devono nemmeno occupare un posto nei
+            # gruppi top-prob / mid / top-quota
+            picks_m = [
+                p for p in picks_m
+                if p["quota"] >= QUOTA_GAMBA_MIN
+            ]
 
             # unione top-8 per PROBABILITA' e top-8 per
             # QUOTA: le 42+ varianti avanzate hanno tante
@@ -10375,7 +10396,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali + schedine a fasce - build 25 set 2026 v13"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali + schedine a fasce (gambe 1.25+) - build 25 set 2026 v13.1"
     )
 
     print(
