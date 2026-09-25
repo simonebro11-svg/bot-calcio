@@ -2,7 +2,6 @@ import os
 import re
 import json
 import time
-import itertools
 import math
 import signal
 import queue
@@ -261,8 +260,8 @@ SLUG_INUTILI = {"club.friendly"}
 # ============================================================
 # SOTTOMENU (nazionali + coppe europee)
 #
-# Ogni sottomenu ha le sue competizioni e le STESSE 4 schedine
-# (SICURA/EQUILIBRATA/AUDACE/MITO) costruite SOLO sulle
+# Ogni sottomenu ha le sue competizioni e le STESSE 5 schedine
+# (SICURA/EQUILIBRATA/AUDACE/MITO/TOP) costruite SOLO sulle
 # partite delle competizioni del sottomenu (stessa logica
 # dell'ottimizzatore: fasce, prob_min, pool a 3 gruppi).
 # ============================================================
@@ -7784,15 +7783,18 @@ def invia_report(
 # ============================================================
 # SCHEDINE
 #
-# Tre schedine pronte costruite sulle partite con affidabilità
-# più alta di TUTTI i campionati in elenco:
-#   🎟 SICURA      quota totale ≤ 10 (2-3 eventi)
-#   ⚡ EQUILIBRATA quota totale ≤ 25 (2-4 eventi)
-#   🔥 AUDACE      quota totale ≤ 50 (3-6 eventi)
-# Per ogni partita si sceglie il mercato con probabilità più
-# alta; la quota è stimata con payout 94%. Le combinazioni
-# vengono scelte massimizzando la probabilità complessiva
-# entro la fascia di quota.
+# Cinque schedine pronte costruite sulle partite con
+# affidabilità più alta di TUTTI i campionati in elenco.
+# Ogni schedina deve cadere nella SUA fascia di quota:
+#   🎟 SICURA      quota 8-15   (affidabilità migliore)
+#   ⚡ EQUILIBRATA quota 20-25
+#   🔥 AUDACE      quota 40-45
+#   💣 MITO        quota 60-80
+#   💎 TOP         quota 150-200 (qualsiasi evento del pool)
+# Per ogni partita si possono usare TUTTI i mercati; la quota
+# e' stimata con payout 94%. La combinazione si cerca con una
+# beam search che massimizza la probabilita' complessiva
+# dentro la fascia (l'esaurivo esploderebbe sulla TOP).
 # ============================================================
 
 try:
@@ -8079,237 +8081,170 @@ def migliori_pick(
 TIERS_SCHEDINE = [
     {
         "nome": "🎟 SCHEDINA SICURA",
-        "cap": 10.0,
-        "min_legs": 2,
-        "max_legs": 3,
-        "floor": 1.5,
-        "candidati": 34,
+        "pav": 8.0,
+        "cap": 15.0,
+        "candidati": 40,
         "prob_min": 0.40,
-        "no_fatica": True
+        "no_fatica": True,
+        "max_legs": 8
     },
     {
         "nome": "⚡ SCHEDINA EQUILIBRATA",
+        "pav": 20.0,
         "cap": 25.0,
-        "min_legs": 2,
-        "max_legs": 4,
-        "floor": 4.0,
-        "candidati": 34,
-        "prob_min": 0.40,
-        "no_fatica": True
+        "candidati": 40,
+        "prob_min": 0.35,
+        "no_fatica": True,
+        "max_legs": 8
     },
     {
         "nome": "🔥 SCHEDINA AUDACE",
-        "cap": 50.0,
-        "min_legs": 3,
-        "max_legs": 6,
-        "floor": 15.0,
-        "candidati": 34,
-        "prob_min": 0.22
+        "pav": 40.0,
+        "cap": 45.0,
+        "candidati": 40,
+        "prob_min": 0.25,
+        "max_legs": 9
     },
     {
         "nome": "💣 SCHEDINA MITO",
-        "cap": 60.0,
-        "min_legs": 4,
-        "max_legs": 6,
-        "floor": 50.0,
-        "candidati": 34,
-        "prob_min": 0.20
+        "pav": 60.0,
+        "cap": 80.0,
+        "candidati": 40,
+        "prob_min": 0.20,
+        "max_legs": 10
+    },
+    {
+        "nome": "💎 SCHEDINA TOP",
+        "pav": 150.0,
+        "cap": 200.0,
+        "candidati": 40,
+        "prob_min": 0.08,
+        "max_legs": 14
     }
 ]
 
 
-def _mito_estesa(
-    tier: Dict[str, Any],
-    combo: List[Dict[str, Any]],
-    quota_tot: float,
-    picks_ordinate: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
+def _beam_schedina(
+    candidati: List[Dict[str, Any]],
+    pav: float,
+    cap: float,
+    max_legs: int
+) -> Optional[tuple]:
 
-    """MITO a 8 GAMBE garantite. Con 8 gambe la quota
-    media per gamba deve essere ~2.1 per superare il
-    pavimento 50: servono gambe GROSSE (2-4.5), non
-    solo quelle economiche. Per ogni partita del pool
-    considero la gamba economica + la grossa + la piu'
-    probabile, scelgo le 20 partite piu' utili e cerco
-    le combinazioni di 8 (partite distinte) con quota
-    in [floor, cap] massimizzando la probabilita'.
-    Se matematicamente impossibile (pool corto o
-    quote tutte piccole) restituisce None."""
+    """Ricerca a fascio (beam search) della
+    combinazione di gambe a probabilita' combinata
+    MASSIMA con quota totale nella fascia [pav, cap].
 
-    filtrati = [
-        p for p in picks_ordinate
-        if p["prob"] / 100.0
-        >= tier["prob_min"]
-    ]
+    Stati = (score, quota, gambe, partite usate).
+    Uno stato che entra in fascia e' TERMINALE:
+    aggiungere gambe puo' solo abbassare la
+    probabilita' combinata (ogni fattore e' < 1).
 
-    # per ogni partita: gamba economica + grossa
-    # (max quota, serve a raggiungere 50+) + la
-    # piu' probabile
-    by_match: Dict[str, List[Dict[str, Any]]] = {}
+    Doppia potatura del fascio: top per probabilita'
+    (gli stati piu' affidabili) + top per quota
+    (gli stati che possono ancora raggiungere la
+    fascia). Senza la seconda potatura restano solo
+    gambe economiche e le fasce alte non si
+    raggiungono mai; l'esaurivo combinatorio invece
+    esplode con la TOP (fino a ~180 mld di combo)."""
 
-    for p in filtrati:
+    pool = list(candidati)[:60]
 
-        by_match.setdefault(
-            p["match_key"], []
-        ).append(p)
+    beam_w = 240
 
-    per_match: Dict[
-        str, List[Dict[str, Any]]
-    ] = {}
+    best = None  # (score, gambe, quota_tot)
 
-    for mk, lista in (
-        by_match.items()
-    ):
+    # stati: (score, quota, gambe, match_keys)
+    stati = [(0.0, 1.0, (), frozenset())]
 
-        scelte = []
+    for _size in range(max(max_legs, 1)):
 
-        economica = min(
-            lista,
-            key=lambda p: p["quota"]
-        )
+        nuovi: Dict[tuple, tuple] = {}
 
-        scelte.append(economica)
+        for lp, qt, legs, mks in stati:
 
-        grossa = max(
-            lista,
-            key=lambda p: p["quota"]
-        )
+            for p in pool:
 
-        if (
-            grossa is not economica
-            and grossa["quota"] <= 6.0
-        ):
+                mk = p["match_key"]
 
-            scelte.append(grossa)
-
-        probabile = max(
-            lista,
-            key=lambda p: p["prob"]
-        )
-
-        if probabile not in scelte:
-            scelte.append(probabile)
-
-        per_match[mk] = scelte
-
-    # selezione delle partite piu' utili: le 10 con
-    # la gamba economica piu' bassa (fattibilita')
-    # + le 10 con la gamba grossa piu' alta
-    # (raggiungimento della fascia 50-60)
-    ord_econ = sorted(
-        per_match.keys(),
-        key=lambda mk: min(
-            p["quota"]
-            for p in per_match[mk]
-        )
-    )[:10]
-
-    ord_grossa = sorted(
-        per_match.keys(),
-        key=lambda mk: -max(
-            p["quota"]
-            for p in per_match[mk]
-        )
-    )[:10]
-
-    visti_m2 = set()
-    match_keys = []
-
-    for mk in ord_econ + ord_grossa:
-
-        if mk in visti_m2:
-            continue
-
-        visti_m2.add(mk)
-        match_keys.append(mk)
-
-    if len(match_keys) < 8:
-        return None
-
-    best = None
-    best_score = None
-
-    # prima prova a chiudere nella parte alta della
-    # finestra (>= 53), poi scende al pavimento
-    for soglia in (53.0, tier["floor"]):
-
-        for otto in itertools.combinations(
-            match_keys,
-            8
-        ):
-
-            # tutte le combinazioni di gambe (1-3
-            # per partita) delle 8 partite scelte
-            for quote in itertools.product(
-                *[
-                    per_match[mk]
-                    for mk in otto
-                ]
-            ):
-
-                quota_tot8 = 1.0
-
-                for p in quote:
-
-                    quota_tot8 *= p["quota"]
-
-                if quota_tot8 > tier["cap"]:
+                if mk in mks:
                     continue
 
-                if quota_tot8 < soglia:
+                nq = qt * p["quota"]
+
+                if nq > cap:
                     continue
 
-                score = 0.0
+                nlp = lp + math.log(
+                    p["prob"] / 100.0
+                )
 
-                for p in quote:
+                nlegs = legs + (p,)
 
-                    score += math.log(
-                        p["prob"] / 100.0
+                if nq >= pav:
+
+                    # in fascia: terminale
+                    if (
+                        best is None
+                        or nlp > best[0]
+                    ):
+                        best = (nlp, nlegs, nq)
+
+                    continue
+
+                chiave = tuple(
+                    sorted(
+                        (l["match_key"],
+                         l["mercato"])
+                        for l in nlegs
                     )
+                )
 
-                if (
-                    best_score is None
-                    or score > best_score
-                ):
+                if chiave in nuovi:
+                    continue
 
-                    best_score = score
-                    best = list(quote)
+                nuovi[chiave] = (
+                    nlp,
+                    nq,
+                    nlegs,
+                    mks | {mk}
+                )
 
-        if best:
+        if not nuovi:
             break
 
-    if not best:
-        return None
+        lista = list(nuovi.values())
 
-    aff_media = sum(
-        p["aff"] for p in best
-    ) / len(best)
+        per_prob = sorted(
+            lista,
+            key=lambda s: -s[0]
+        )[:beam_w]
 
-    prob_combinata = (
-        100.0
-        * math.prod(
-            p["prob"] / 100.0
-            for p in best
-        )
-    )
+        per_q = sorted(
+            lista,
+            key=lambda s: -s[1]
+        )[:beam_w]
 
-    return {
-        "tier": tier,
-        "legs": best,
-        "quota_tot": round(
-            math.prod(
-                p["quota"] for p in best
-            ),
-            2
-        ),
-        "aff_media": round(
-            aff_media
-        ),
-        "prob_combinata": round(
-            prob_combinata,
-            1
-        )
-    }
+        visti_b = set()
+        stati = []
+
+        for st in per_prob + per_q:
+
+            k = tuple(
+                sorted(
+                    (l["match_key"],
+                     l["mercato"])
+                    for l in st[2]
+                )
+            )
+
+            if k in visti_b:
+                continue
+
+            visti_b.add(k)
+            stati.append(st)
+
+    return best
 
 
 def costruisci_schedina(
@@ -8345,9 +8280,10 @@ def costruisci_schedina(
 
     # Selezione bilanciata: meta' delle gambe piu'
     # PROBABILI (per non buttare fuori le doppie
-    # chance alte) + meta' delle gambe a QUOTA piu'
-    # alta (per raggiungere le fasce delle schedine
-    # alte come l'AUDACE).
+    # chance alte) + banda CENTRALE (1.35-2.19,
+    # il minor rischio per gamba) + meta' a QUOTA
+    # piu' alta (esatti e mercati grossi: servono
+    # a MITO e TOP per raggiungere la fascia).
     per_prob = sorted(
         candidati,
         key=lambda p: -p["prob"]
@@ -8358,11 +8294,6 @@ def costruisci_schedina(
         key=lambda p: -p["quota"]
     )[:tier["candidati"] // 2]
 
-    # GRUPPO MID: la parte centrale della scala quote
-    # (1.35-2.19) e' quella che consente di riempire
-    # le fasce con il minor rischio per gamba: senza
-    # questo gruppo resta un buco tra top-probabilita'
-    # (1.03-1.14) e top-quota (2.2+)
     mid = [
         p for p in candidati
         if 1.35 <= p["quota"] <= 2.19
@@ -8390,124 +8321,36 @@ def costruisci_schedina(
 
         candidati.append(p)
 
-    # NUOVA LOGICA FASCE: prima la fascia target
-    # [floor, cap]; solo se NON esiste nessuna
-    # combinazione in fascia si scende (floor*0.5,
-    # poi qualunque quota sotto cap). Dentro la
-    # prima fascia non vuota vince il punteggio di
-    # probabilita' piu' alto.
-    fasce = [
-        tier["floor"],
-        tier["floor"] * 0.5,
-        0.0
-    ]
-
-    best = None
-
-    for floor in fasce:
-
-        best_fase = None
-        best_score = None
-
-        for size in range(
-            tier["min_legs"],
-            tier["max_legs"] + 1
-        ):
-
-            if size > len(candidati):
-                break
-
-            for combo in itertools.combinations(
-                candidati,
-                size
-            ):
-
-                # mai due eventi della stessa partita
-                chiavi = {
-                    p["match_key"]
-                    for p in combo
-                }
-
-                if len(chiavi) != size:
-                    continue
-
-                quota_tot = 1.0
-                score = 0.0
-
-                for p in combo:
-
-                    quota_tot *= p[
-                        "quota"
-                    ]
-
-                    score += math.log(
-                        p["prob"]
-                        / 100.0
-                    )
-
-                if quota_tot > tier["cap"]:
-                    continue
-
-                if quota_tot < floor:
-                    continue
-
-                if (
-                    best_score is None
-                    or score > best_score
-                ):
-
-                    best_score = score
-                    best_fase = (
-                        combo,
-                        quota_tot
-                    )
-
-        if best_fase:
-            best = best_fase
-            break
+    # fascia obbligatoria [pav, cap]; vince la
+    # combinazione a probabilita' combinata piu'
+    # alta (per la SICURA e' proprio l'affidabi-
+    # lita' migliore). Nessun vincolo sul numero
+    # di gambe: lo decide la ricerca.
+    best = _beam_schedina(
+        candidati,
+        tier["pav"],
+        tier["cap"],
+        tier["max_legs"]
+    )
 
     if not best:
         return None
 
-    combo, quota_tot = best
-
-    # MITO: se la combinazione migliore resta sul
-    # pavimento (~50) si ripete la ricerca con piu'
-    # GAMBE (7-8) per spingere la quota in [53, cap];
-    # se non esiste nulla di meglio resta questa.
-    if (
-        tier["cap"] >= 59.5
-        and len(combo) < 8
-        and tier["max_legs"] <= 6
-    ):
-
-        estesa = _mito_estesa(
-            tier,
-            combo,
-            quota_tot,
-            picks_ordinate
-        )
-
-        if estesa:
-            return estesa
+    legs = list(best[1])
 
     aff_media = sum(
-        p["aff"] for p in combo
-    ) / len(combo)
+        p["aff"] for p in legs
+    ) / len(legs)
 
     prob_combinata = (
-        100.0
-        * math.prod(
-            p["prob"] / 100.0
-            for p in combo
-        )
+        100.0 * math.exp(best[0])
     )
 
     return {
         "tier": tier,
-        "legs": list(combo),
+        "legs": legs,
         "quota_tot": round(
-            quota_tot,
+            best[2],
             2
         ),
         "aff_media": round(
@@ -8529,7 +8372,8 @@ def format_schedina(
     righe = [
         f"<b>{tier['nome']}</b>",
         (
-            f"Quota massima: "
+            f"Fascia quota: "
+            f"{tier['pav']:.0f}-"
             f"{tier['cap']:.0f}"
         ),
         "",
@@ -8869,7 +8713,7 @@ def crea_schedine(
             # gambe sicure che selezionandole solo per
             # probabilita' spazzerebbero via i mercati a
             # quota alta
-            # (servono alle fasce AUDACE/MITO)
+            # (servono alle fasce AUDACE/MITO/TOP)
             # 3 gruppi per match: piu' PROBABILI, banda
             # CENTRALE (1.35-2.19) e piu' QUOTA: il pool
             # deve coprire TUTTA la scala quote, altrimenti
@@ -8978,7 +8822,8 @@ def crea_schedine(
                 f"   {tier['nome']}: "
                 f"{len(s['legs'])} eventi, "
                 f"quota {s['quota_tot']:.2f} "
-                f"(cap {tier['cap']:.0f}), "
+                f"(fascia {tier['pav']:.0f}-"
+                f"{tier['cap']:.0f}), "
                 f"aff {s['aff_media']}%"
             )
 
@@ -9007,6 +8852,7 @@ def crea_schedine(
         if not selezionate:
 
             disponibili = ", ".join(
+                f"{s['tier']['pav']:.0f}-"
                 f"{s['tier']['cap']:.0f} "
                 f"({s['quota_tot']:.2f})"
                 for s in schedine
@@ -9016,7 +8862,7 @@ def crea_schedine(
 
             return [
                 "Non sono riuscito a costruire una "
-                "schedina entro quota "
+                "schedina in fascia "
                 f"{cap:.0f}.\n\n"
                 "Quelle riuscite: "
                 + disponibili
@@ -9103,23 +8949,30 @@ def crea_menu_campionati():
 
     markup.row(
         types.InlineKeyboardButton(
-            "🎟 SICURA ≤10",
-            callback_data="schedina:10"
+            "🎟 SICURA 8-15",
+            callback_data="schedina:15"
         ),
         types.InlineKeyboardButton(
-            "⚡ EQUILIBRATA ≤25",
+            "⚡ EQUILIBRATA 20-25",
             callback_data="schedina:25"
         )
     )
 
     markup.row(
         types.InlineKeyboardButton(
-            "🔥 AUDACE ≤50",
-            callback_data="schedina:50"
+            "🔥 AUDACE 40-45",
+            callback_data="schedina:45"
         ),
         types.InlineKeyboardButton(
-            "💣 MITO 51-60",
-            callback_data="schedina:60"
+            "💣 MITO 60-80",
+            callback_data="schedina:80"
+        )
+    )
+
+    markup.row(
+        types.InlineKeyboardButton(
+            "💎 TOP 150-200",
+            callback_data="schedina:200"
         )
     )
 
@@ -9173,13 +9026,13 @@ def crea_menu_sottomenu(
 
     markup.row(
         types.InlineKeyboardButton(
-            "🎟 SICURA ≤10",
+            "🎟 SICURA 8-15",
             callback_data=(
-                f"schedina:10:{scope}"
+                f"schedina:15:{scope}"
             )
         ),
         types.InlineKeyboardButton(
-            "⚡ EQUILIBRATA ≤25",
+            "⚡ EQUILIBRATA 20-25",
             callback_data=(
                 f"schedina:25:{scope}"
             )
@@ -9188,15 +9041,24 @@ def crea_menu_sottomenu(
 
     markup.row(
         types.InlineKeyboardButton(
-            "🔥 AUDACE ≤50",
+            "🔥 AUDACE 40-45",
             callback_data=(
-                f"schedina:50:{scope}"
+                f"schedina:45:{scope}"
             )
         ),
         types.InlineKeyboardButton(
-            "💣 MITO 51-60",
+            "💣 MITO 60-80",
             callback_data=(
-                f"schedina:60:{scope}"
+                f"schedina:80:{scope}"
+            )
+        )
+    )
+
+    markup.row(
+        types.InlineKeyboardButton(
+            "💎 TOP 150-200",
+            callback_data=(
+                f"schedina:200:{scope}"
             )
         )
     )
@@ -9247,8 +9109,8 @@ Il bot elaborerà:
 • Gol/No Gol
 • goal attesi
 • affidabilità dei dati
-• 🎟 schedine pronte: SICURA (fino a 10), EQUILIBRATA (fino a 25), AUDACE (fino a 50), MITO (51-60)
-• 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche\n• 🌍 Nazionali e 🏆 Champions/Europa: sottomenu con report e le stesse 4 schedine
+• 🎟 schedine pronte: SICURA (8-15), EQUILIBRATA (20-25), AUDACE (40-45), MITO (60-80), TOP (150-200)
+• 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche\n• 🌍 Nazionali e 🏆 Champions/Europa: sottomenu con report e le stesse 5 schedine
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
 """.strip()
@@ -9539,9 +9401,9 @@ def callback_sottomenu(call):
                 f"{titolo}\n\n"
                 "Scegli la competizione da "
                 "analizzare, oppure genera "
-                "direttamente le 4 schedine "
+                "direttamente le 5 schedine "
                 "(SICURA, EQUILIBRATA, AUDACE, "
-                "MITO) su tutte le competizioni "
+                "MITO, TOP) su tutte le competizioni "
                 "del sottomenu."
             ),
             reply_markup=markup
@@ -10513,7 +10375,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali - build 25 set 2026 v12"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali + schedine a fasce - build 25 set 2026 v13"
     )
 
     print(
