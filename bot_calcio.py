@@ -914,12 +914,18 @@ def _storia_stagione(
     if cached is not None:
         return cached
 
+    # NB: chiave DIVERSA per la cache HTTP: espn_get
+    # salva sotto cache_key il JSON GREZZO; qui sotto
+    # "storia_raw_..." salviamo invece la LISTA eventi
+    # gia' estratta (parsed). Stessa chiave = al secondo
+    # utilizzo cache_get ritornava il dict grezzo e
+    # list(dict) produceva stringhe -> rientri a 0.
     data = espn_get(
         f"all/teams/{team_id}/schedule",
         params={
             "season": season
         },
-        cache_key=cache_key
+        cache_key=f"storia_http_{team_id}_{season}"
     )
 
     if not data:
@@ -931,6 +937,8 @@ def _storia_stagione(
 
     if not isinstance(eventi, list):
         return []
+
+    cache_set(cache_key, eventi)
 
     return eventi
 
@@ -4381,6 +4389,16 @@ TRASFERTE_GIORNI = 10
 TRASFERTE_BONUS = 7
 TRASFERTE_MAX = 14
 
+# RIENTRI DA NAZIONALE: titolari del club usati come
+# titolari nelle partite delle nazionali negli ultimi
+# 12 giorni (incrocio per nome tra i rosters ESPN).
+# +2 fatica ciascuno, max +10. Solo per i club: per
+# le nazionali stesse il concetto non si applica.
+RADUNO_GIORNI = 12
+RADUNO_CALL_MAX = 100
+RIENTRI_FATICA = 2
+RIENTRI_FATICA_MAX = 10
+
 
 def bonus_trasferte(
     form: List[Dict[str, Any]],
@@ -4443,6 +4461,473 @@ def bonus_trasferte(
         TRASFERTE_MAX,
         n * TRASFERTE_BONUS
     )
+
+
+# lock: con le analisi parallele SOLO un thread alla
+# volta costruisce raduno/starters (evita burst di
+# chiamate ESPN simultanee che finiscono in 403)
+_RADUNO_LOCK = threading.Lock()
+_STARTERS_LOCK = threading.Lock()
+
+
+def _raduno_nomi() -> set:
+
+    """Nomi (normalizzati) dei titolari usati nelle
+    partite delle nazionali negli ultimi RADUNO_GIORNI
+    giorni. Il scoreboard ESPN rimuove le partite finite
+    da piu' di ~2 giorni: per coprire TUTTO il raduno si
+    parte dalle squadre visibili e si espande coi
+    calendari di squadra (2 salti), poi summary con lo
+    slug generico 'all'. Cache 3h; max 100 summary."""
+
+    cache_key = "raduno_nomi"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else set()
+        )
+
+    with _RADUNO_LOCK:
+
+        cached = cache_get(cache_key)
+
+        if cached is not None:
+            return (
+                cached
+                if cached != -1
+                else set()
+            )
+
+        return _raduno_nomi_build(cache_key)
+
+
+def _raduno_nomi_build(cache_key: str) -> set:
+
+    try:
+
+        oggi = datetime.now(timezone.utc)
+
+        inizio_w = (
+            oggi - timedelta(days=RADUNO_GIORNI)
+        )
+
+        anno = (
+            oggi.year
+            if oggi.month >= 7
+            else oggi.year - 1
+        )
+
+        # 1) squadre nazionali visibili nei giorni non
+        #    ancora ripuliti dallo scoreboard
+        team_ids: Dict[str, bool] = {}
+
+        for slug in (
+            "uefa.nations",
+            "fifa.friendly"
+        ):
+
+            for i in range(RADUNO_GIORNI):
+
+                d = (
+                    oggi
+                    - timedelta(days=i)
+                ).strftime("%Y%m%d")
+
+                try:
+
+                    sb = espn_get(
+                        f"{slug}/scoreboard",
+                        params={"dates": d}
+                    )
+
+                except Exception:
+                    continue
+
+                for ev in (
+                    sb.get("events") or []
+                ):
+
+                    for comp in (
+                        (
+                            ev.get(
+                                "competitions"
+                            )
+                            or [{}]
+                        )[0].get(
+                            "competitors"
+                        )
+                        or []
+                    ):
+
+                        tt = (
+                            comp.get("team")
+                            or {}
+                        )
+
+                        tid = str(
+                            tt.get("id") or ""
+                        )
+
+                        if tid:
+                            team_ids[tid] = True
+
+        # 2) calendari di squadra: coprono ANCHE le
+        #    partite rimosse dallo scoreboard
+        eventi: Dict[str, Any] = {}
+
+        bordo = list(team_ids.keys())
+
+        for hop in (0, 1):
+
+            nuovi: Dict[str, bool] = {}
+
+            for tid in bordo:
+
+                evs = _storia_stagione(
+                    tid, anno
+                ) or []
+
+                if not evs:
+
+                    evs = _storia_stagione(
+                        tid, anno - 1
+                    ) or []
+
+                for ev in evs:
+
+                    dt = parse_datetime(
+                        ev.get("date", "")
+                    )
+
+                    if (
+                        not dt
+                        or dt > oggi
+                        or dt < inizio_w
+                    ):
+                        continue
+
+                    h, a = estrai_competitors(
+                        ev
+                    )
+
+                    if not h or not a:
+                        continue
+
+                    hs = estrai_score(h)
+                    as_ = estrai_score(a)
+
+                    if (
+                        hs is None
+                        or as_ is None
+                    ):
+                        continue
+
+                    eid = str(
+                        ev.get("id") or ""
+                    )
+
+                    if eid:
+                        eventi[eid] = ev
+
+                    if hop == 0:
+
+                        for comp in (
+                            (
+                                ev.get(
+                                    "competitions"
+                                )
+                                or [{}]
+                            )[0].get(
+                                "competitors"
+                            )
+                            or []
+                        ):
+
+                            tt = (
+                                comp.get("team")
+                                or {}
+                            )
+
+                            tid2 = str(
+                                tt.get("id")
+                                or ""
+                            )
+
+                            if (
+                                tid2
+                                and tid2
+                                not in team_ids
+                            ):
+                                nuovi[tid2] = True
+
+            team_ids.update(nuovi)
+
+            bordo = list(nuovi.keys())
+
+        # 3) summary -> titolari
+        nomi: set = set()
+
+        chiamate = 0
+
+        for eid in eventi:
+
+            if chiamate >= RADUNO_CALL_MAX:
+                break
+
+            try:
+
+                sm = espn_get(
+                    "all/summary",
+                    params={"event": eid}
+                )
+
+            except Exception:
+                continue
+
+            chiamate += 1
+
+            for r in (
+                sm.get("rosters") or []
+            ):
+
+                for v in (
+                    r.get("roster") or []
+                ):
+
+                    if not v.get("starter"):
+                        continue
+
+                    nome = normalizza_nome(
+                        str(
+                            (
+                                v.get("athlete")
+                                or {}
+                            ).get(
+                                "displayName"
+                            )
+                            or ""
+                        )
+                    )
+
+                    if nome:
+                        nomi.add(nome)
+
+        if chiamate == 0:
+
+            cache_set(cache_key, -1, 300)
+
+            return set()
+
+        # raduno FINITO (nessuna gara nelle ultime 30h):
+        # il set non cambia piu' -> cache lunga per
+        # coprire tutto il weekend; durante il raduno
+        # si aggiorna ogni 3h
+        raduno_attivo = False
+
+        for ev in eventi.values():
+
+            dt = parse_datetime(
+                ev.get("date", "")
+            )
+
+            if (
+                dt
+                and dt
+                >= oggi - timedelta(hours=30)
+            ):
+                raduno_attivo = True
+
+                break
+
+        cache_set(
+            cache_key,
+            nomi,
+            3 * 3600 if raduno_attivo else 5 * 86400
+        )
+
+        return nomi
+
+    except Exception:
+
+        cache_set(cache_key, -1, 300)
+
+        return set()
+
+
+def _starters_ultima(
+    team_id: Any,
+    league: str
+) -> set:
+
+    """Titolari dell'ultima partita GIOCATA della
+    squadra (summary ESPN). Cache 6h."""
+
+    if not team_id:
+        return set()
+
+    cache_key = f"starters_ult_{team_id}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else set()
+        )
+
+    with _STARTERS_LOCK:
+
+        cached = cache_get(cache_key)
+
+        if cached is not None:
+            return (
+                cached
+                if cached != -1
+                else set()
+            )
+
+        try:
+
+            return _starters_ultima_build(
+                team_id,
+                league,
+                cache_key
+            )
+
+        except Exception:
+
+            cache_set(cache_key, -1, 300)
+
+            return set()
+
+
+def _starters_ultima_build(
+    team_id: Any,
+    league: str,
+    cache_key: str
+) -> set:
+
+    try:
+
+        oggi = datetime.now(timezone.utc)
+
+        anno = (
+            oggi.year
+            if oggi.month >= 7
+            else oggi.year - 1
+        )
+
+        eventi = list(
+            _storia_stagione(team_id, anno) or []
+        )
+
+        if not eventi:
+
+            eventi = list(
+                _storia_stagione(
+                    team_id, anno - 1
+                ) or []
+            )
+
+        giocate = []
+
+        for ev in eventi:
+
+            h, a = estrai_competitors(ev)
+
+            if not h or not a:
+                continue
+
+            hs = estrai_score(h)
+            as_ = estrai_score(a)
+
+            if hs is None or as_ is None:
+                continue
+
+            dt = parse_datetime(
+                ev.get("date", "")
+            )
+
+            if not dt:
+                continue
+
+            giocate.append((dt, ev))
+
+        if not giocate:
+
+            cache_set(cache_key, -1, 300)
+
+            return set()
+
+        _, ev = max(
+            giocate,
+            key=lambda x: x[0]
+        )
+
+        sm = espn_get(
+            f"{league}/summary",
+            params={
+                "event": str(ev.get("id"))
+            }
+        )
+
+        starters: set = set()
+
+        for r in (
+            sm.get("rosters") or []
+        ):
+
+            tid = str(
+                (r.get("team") or {}).get(
+                    "id"
+                )
+                or ""
+            )
+
+            if (
+                tid
+                and tid != str(team_id)
+            ):
+                continue
+
+            for v in (
+                r.get("roster") or []
+            ):
+
+                if not v.get("starter"):
+                    continue
+
+                nome = normalizza_nome(
+                    str(
+                        (
+                            v.get("athlete")
+                            or {}
+                        ).get("displayName")
+                        or ""
+                    )
+                )
+
+                if nome:
+                    starters.add(nome)
+
+        cache_set(
+            cache_key,
+            starters,
+            6 * 3600
+        )
+
+        return starters
+
+    except Exception:
+
+        cache_set(cache_key, -1, 300)
+
+        return set()
 
 
 def indice_fatica(
@@ -5860,6 +6345,71 @@ def analizza_partita(
         fatica_away + viaggi_away
     )
 
+    # RIENTRI DA NAZIONALE: titolari del club usati
+    # come titolari nel raduno appena concluso
+    # (solo club: per le nazionali non ha senso)
+    rientri_home = 0
+    rientri_away = 0
+
+    try:
+
+        if league not in (
+            "uefa.nations",
+            "fifa.friendly"
+        ):
+
+            nomi_raduno = _raduno_nomi()
+
+            if nomi_raduno:
+
+                sh_st = _starters_ultima(
+                    home_id, league
+                )
+
+                sa_st = _starters_ultima(
+                    away_id, league
+                )
+
+                if sh_st:
+                    rientri_home = len(
+                        sh_st & nomi_raduno
+                    )
+
+                if sa_st:
+                    rientri_away = len(
+                        sa_st & nomi_raduno
+                    )
+
+                if rientri_home:
+
+                    fatica_home = min(
+                        70,
+                        fatica_home
+                        + min(
+                            RIENTRI_FATICA_MAX,
+                            rientri_home
+                            * RIENTRI_FATICA
+                        )
+                    )
+
+                if rientri_away:
+
+                    fatica_away = min(
+                        70,
+                        fatica_away
+                        + min(
+                            RIENTRI_FATICA_MAX,
+                            rientri_away
+                            * RIENTRI_FATICA
+                        )
+                    )
+
+    except Exception as _exc_rientri:
+
+        print(
+            f"\u26a0\ufe0f Rientri: {_exc_rientri}"
+        )
+
     # --------------------------------------------------------
     # MOMENTUM
     # --------------------------------------------------------
@@ -6172,6 +6722,8 @@ def analizza_partita(
         "fatica_away": fatica_away,
         "viaggi_home": viaggi_home,
         "viaggi_away": viaggi_away,
+        "rientri_home": rientri_home,
+        "rientri_away": rientri_away,
         "momentum_home": momentum_home,
         "momentum_away": momentum_away,
         "prob_home": prob_home,
@@ -6674,6 +7226,34 @@ def format_report_partita(
             + " fatica)"
         )
 
+    rientri_txt_home = ""
+
+    if analisi.get("rientri_home"):
+
+        rientri_txt_home = (
+            "\nRientri da nazionale: "
+            + str(analisi["rientri_home"])
+            + (
+                " titolare"
+                if analisi["rientri_home"] == 1
+                else " titolari"
+            )
+        )
+
+    rientri_txt_away = ""
+
+    if analisi.get("rientri_away"):
+
+        rientri_txt_away = (
+            "\nRientri da nazionale: "
+            + str(analisi["rientri_away"])
+            + (
+                " titolare"
+                if analisi["rientri_away"] == 1
+                else " titolari"
+            )
+        )
+
     trasferte_txt_away = ""
 
     if analisi.get("viaggi_away"):
@@ -6759,10 +7339,10 @@ PPG campionato: {lp_text(analisi['lp_away'])}
 <b>⏱ RIPOSO / FATICA</b>
 
 {home}: {riposo_text(riposo_h)}
-Indice fatica: {analisi['fatica_home']}/70{trasferte_txt_home}
+Indice fatica: {analisi['fatica_home']}/70{trasferte_txt_home}{rientri_txt_home}
 
 {away}: {riposo_text(riposo_a)}
-Indice fatica: {analisi['fatica_away']}/70{trasferte_txt_away}
+Indice fatica: {analisi['fatica_away']}/70{trasferte_txt_away}{rientri_txt_away}
 
 <b>🌍 IMPEGNI EUROPEI</b>
 
@@ -9933,7 +10513,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + trasferte - build 25 set 2026 v11"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali - build 25 set 2026 v12"
     )
 
     print(
@@ -10017,6 +10597,15 @@ def main():
             "\U0001f493 Keep-alive attivo "
             "(ping ogni 10 min)"
         )
+
+        # pre-carico dei rientri da nazionale in
+        # background: l'elenco costoso (fino a 100
+        # summary ESPN) e' pronto PRIMA delle
+        # richieste degli utenti, mai dentro
+        threading.Thread(
+            target=_raduno_nomi,
+            daemon=True
+        ).start()
 
     # Webhook (con self-check e fallback)
     webhook_ok = (
