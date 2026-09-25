@@ -4360,6 +4360,91 @@ def riposo_reale(
     )
 
 
+# ------------------------------------------------------------
+# TRASFERTE RECENTI (fatica da viaggi)
+#
+# Bonus all'indice fatica per le partite in trasferta negli
+# ultimi 10 giorni (+7 ciascuna, max +14): cattura il carico
+# da viaggi (campionato + coppe + nazionali in trasferta).
+# Differenziale: colpisce solo chi ha viaggiato di piu'.
+# Euristiche conservative (il dato "km percorsi" gratuito
+# non esiste); il filtro no-fatica delle schedine prudenti
+# le considera automaticamente.
+#
+# NOTA misurata sui dati (7.082 partite fduk 2223-2526):
+# le partite dei club DOPO le finestre FIFA fanno PIU' gol
+# (+0.228/partita, +8.2%) non meno: quindi nessuna riduzione
+# dei goal attesi post-raduno (sarebbe stata contro i dati).
+# ------------------------------------------------------------
+
+TRASFERTE_GIORNI = 10
+TRASFERTE_BONUS = 7
+TRASFERTE_MAX = 14
+
+
+def bonus_trasferte(
+    form: List[Dict[str, Any]],
+    nome_squadra: str,
+    data_evento: Optional[datetime]
+) -> int:
+
+    """Punti fatica extra per le trasferte degli ultimi
+    10 giorni (prima della data dell'evento)."""
+
+    if (
+        not form
+        or not data_evento
+    ):
+        return 0
+
+    squadra_norm = normalizza_nome(
+        nome_squadra
+    )
+
+    inizio = (
+        data_evento
+        - timedelta(
+            days=TRASFERTE_GIORNI
+        )
+    )
+
+    n = 0
+
+    for x in form:
+
+        dt = x.get("date")
+
+        if not dt:
+            continue
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        if not (
+            inizio
+            <= dt
+            < data_evento
+        ):
+            continue
+
+        away = normalizza_nome(
+            str(x.get("away") or "")
+        )
+
+        if (
+            away
+            and away == squadra_norm
+        ):
+            n += 1
+
+    return min(
+        TRASFERTE_MAX,
+        n * TRASFERTE_BONUS
+    )
+
+
 def indice_fatica(
     giorni: Optional[float]
 ) -> int:
@@ -5751,6 +5836,30 @@ def analizza_partita(
         riposo_away
     )
 
+    # fatica da VIAGGI (trasferte ultimi 10 gg):
+    # si somma all'indice da riposo
+    viaggi_home = bonus_trasferte(
+        form_home,
+        home_name,
+        data_evento
+    )
+
+    fatica_home = min(
+        70,
+        fatica_home + viaggi_home
+    )
+
+    viaggi_away = bonus_trasferte(
+        form_away,
+        away_name,
+        data_evento
+    )
+
+    fatica_away = min(
+        70,
+        fatica_away + viaggi_away
+    )
+
     # --------------------------------------------------------
     # MOMENTUM
     # --------------------------------------------------------
@@ -6061,6 +6170,8 @@ def analizza_partita(
         "riposo_away": riposo_away,
         "fatica_home": fatica_home,
         "fatica_away": fatica_away,
+        "viaggi_home": viaggi_home,
+        "viaggi_away": viaggi_away,
         "momentum_home": momentum_home,
         "momentum_away": momentum_away,
         "prob_home": prob_home,
@@ -6551,6 +6662,30 @@ def format_report_partita(
 
         return str(value)
 
+    trasferte_txt_home = ""
+
+    if analisi.get("viaggi_home"):
+
+        trasferte_txt_home = (
+            "\nTrasferte 10gg: "
+            + str(analisi["viaggi_home"])
+            + " (+"
+            + str(analisi["viaggi_home"])
+            + " fatica)"
+        )
+
+    trasferte_txt_away = ""
+
+    if analisi.get("viaggi_away"):
+
+        trasferte_txt_away = (
+            "\nTrasferte 10gg: "
+            + str(analisi["viaggi_away"])
+            + " (+"
+            + str(analisi["viaggi_away"])
+            + " fatica)"
+        )
+
     # --------------------------------------------------------
     # H2H
     # --------------------------------------------------------
@@ -6624,10 +6759,10 @@ PPG campionato: {lp_text(analisi['lp_away'])}
 <b>⏱ RIPOSO / FATICA</b>
 
 {home}: {riposo_text(riposo_h)}
-Indice fatica: {analisi['fatica_home']}/70
+Indice fatica: {analisi['fatica_home']}/70{trasferte_txt_home}
 
 {away}: {riposo_text(riposo_a)}
-Indice fatica: {analisi['fatica_away']}/70
+Indice fatica: {analisi['fatica_away']}/70{trasferte_txt_away}
 
 <b>🌍 IMPEGNI EUROPEI</b>
 
@@ -9798,7 +9933,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + MITO 8 - build 25 set 2026 v10"
+        "\U0001f4a3 Dixon-Coles + Elo + trasferte - build 25 set 2026 v11"
     )
 
     print(
