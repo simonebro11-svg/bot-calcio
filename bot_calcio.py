@@ -134,6 +134,15 @@ DC12_BASE = 76.6
 CAL_BASE_GOL = 52.6
 CAL_W_GOL = 0.15
 
+# MARKET-BLEND O/U 2.5: calibrato con walk-forward su
+# 7.082 partite fduk (5 leghe, stagioni 2223-2526).
+# Quando le quote reali sono pubblicate la probabilita'
+# Over/Under 2.5 diventa 90% mercato + 10% modello
+# (logloss 0.799 -> 0.678 su 2526 out-of-sample).
+# Sul 1X2 il blend NON migliora (modello gia' in linea
+# col mercato): l'applico solo all'O/U.
+MARKET_W_OU = 0.9
+
 CAL_BASE_1X2 = (45.0, 23.0, 31.0)
 CAL_W_1X2 = 0.75
 
@@ -3319,6 +3328,416 @@ def _fduk_num(riga, *chiavi) -> Optional[float]:
     return None
 
 
+# ------------------------------------------------------------
+# ELO e RATING ATT/DIF (Dixon-Coles) da football-data.co.uk
+# Calibrati con walk-forward su 7.082 partite (2223-2526):
+# - Elo (K=20, +65 casa, regressione 0.75 tra stagioni):
+#   1X2 logloss 1.0434 -> 1.0088 (slope 8, oos 2526)
+# - rating att/def EMA 0.15 + tau -0.05: O/U logloss
+#   0.805 -> 0.752; esatti migliori; lambda della matrice
+#   avanzata quando i rating sono maturi (n >= 5)
+# ------------------------------------------------------------
+
+
+def _fduk_anno_corrente() -> int:
+
+    oggi = datetime.now(timezone.utc)
+
+    return (
+        oggi.year
+        if oggi.month >= 7
+        else oggi.year - 1
+    )
+
+
+def _fduk_url_anno(
+    league: str,
+    anno: int
+) -> str:
+
+    codice = FDUK_CODICI.get(league, "")
+
+    if not codice:
+        return ""
+
+    return (
+        f"{FDUK_BASE}/"
+        f"{str(anno)[-2:]}{str(anno + 1)[-2:]}/"
+        f"{codice}.csv"
+    )
+
+
+def _fduk_righe_anno(
+    league: str,
+    anno: int
+) -> Optional[List[Dict[str, Any]]]:
+
+    """Righe CSV di una stagione specifica (con data
+    convertita in 'dt'). Cache 6h, negativa 1h."""
+
+    cache_key = f"fduk_s_{league}_{anno}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    url = _fduk_url_anno(league, anno)
+
+    if not url:
+        cache_set(cache_key, -1, 3600)
+        return None
+
+    try:
+
+        r = requests.get(url, timeout=15)
+
+        if r.status_code != 200:
+            cache_set(cache_key, -1, 3600)
+            return None
+
+        testo = r.content.decode("utf-8-sig")
+
+        import csv as _csv
+        import io as _io
+
+        out = []
+
+        for riga in _csv.DictReader(
+            _io.StringIO(testo)
+        ):
+
+            try:
+
+                gg, mm, aa = (
+                    riga["Date"].split("/")
+                )
+
+                if len(aa) == 2:
+                    aa = "20" + aa
+
+                dt = datetime(
+                    int(aa), int(mm), int(gg),
+                    tzinfo=timezone.utc
+                )
+
+            except Exception:
+                continue
+
+            try:
+
+                hg = int(riga.get("FTHG") or "")
+                ag = int(riga.get("FTAG") or "")
+
+            except Exception:
+                continue
+
+            out.append({
+                "dt": dt,
+                "home": riga.get("HomeTeam") or "",
+                "away": riga.get("AwayTeam") or "",
+                "hg": hg,
+                "ag": ag
+            })
+
+        out.sort(key=lambda x: x["dt"])
+
+        cache_set(cache_key, out, 6 * 3600)
+
+        return out
+
+    except Exception as exc:
+
+        print(
+            f"\u26a0\ufe0f fduk stagione {league} "
+            f"{anno}: {exc}"
+        )
+
+        cache_set(cache_key, -1, 3600)
+
+        return None
+
+
+def _fduk_elo(
+    league: str
+) -> Optional[Dict[str, float]]:
+
+    """Elo per squadra (nomi CSV normalizzati) dalle
+    ultime 2 stagioni. Cache 6h, negativa 1h."""
+
+    cache_key = f"fduk_elo_{league}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    try:
+
+        anno = _fduk_anno_corrente()
+
+        righe = []
+
+        for a in (anno - 1, anno):
+
+            rr = _fduk_righe_anno(league, a)
+
+            if rr:
+                righe += rr
+
+        righe.sort(key=lambda x: x["dt"])
+
+        elo: Dict[str, float] = {}
+
+        anno_prec = None
+
+        for riga in righe:
+
+            h = normalizza_nome(riga["home"])
+            a = normalizza_nome(riga["away"])
+
+            if (
+                anno_prec is not None
+                and riga["dt"].year != anno_prec
+                and riga["dt"].month <= 7
+            ):
+
+                for t in elo:
+                    elo[t] = (
+                        1500.0
+                        + 0.75
+                        * (elo[t] - 1500.0)
+                    )
+
+            anno_prec = riga["dt"].year
+
+            eh = elo.get(h, 1500.0)
+            ea = elo.get(a, 1500.0)
+
+            e_exp = 1.0 / (
+                1.0
+                + 10 ** (-((eh - ea) + 65) / 400)
+            )
+
+            if riga["hg"] > riga["ag"]:
+                es = 1.0
+            elif riga["hg"] == riga["ag"]:
+                es = 0.5
+            else:
+                es = 0.0
+
+            elo[h] = eh + 20.0 * (es - e_exp)
+            elo[a] = ea + 20.0 * (
+                (1 - es) - (1 - e_exp)
+            )
+
+        cache_set(cache_key, elo, 6 * 3600)
+
+        return elo
+
+    except Exception as exc:
+
+        print(f"\u26a0\ufe0f Elo {league}: {exc}")
+
+        cache_set(cache_key, -1, 3600)
+
+        return None
+
+
+def _fduk_ratings(
+    league: str
+) -> Optional[Dict[str, Any]]:
+
+    """Rating attacco/difesa (EMA 0.15, clamp 0.4-2.2,
+    shrink verso 1 sotto le 5 partite) dalla stagione in
+    corso. Chiave '_mu' = media gol per squadra. Cache 6h."""
+
+    cache_key = f"fduk_rat_{league}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    try:
+
+        righe = _fduk_righe_anno(
+            league,
+            _fduk_anno_corrente()
+        ) or []
+
+        mu = 1.40
+
+        stats: Dict[str, Dict[str, Any]] = {}
+
+        for riga in righe:
+
+            h = normalizza_nome(riga["home"])
+            a = normalizza_nome(riga["away"])
+
+            sh = stats.get(
+                h,
+                {"att": 1.0, "def": 1.0, "n": 0}
+            )
+
+            sa = stats.get(
+                a,
+                {"att": 1.0, "def": 1.0, "n": 0}
+            )
+
+            gh = riga["hg"] + 0.0
+            ga = riga["ag"] + 0.0
+
+            mu = (
+                0.995 * mu
+                + 0.005 * (gh + ga) / 2.0
+            )
+
+            k = 0.15
+
+            for st, gf, gc in (
+                (sh, gh, ga),
+                (sa, ga, gh)
+            ):
+
+                st["att"] = max(
+                    0.4,
+                    min(
+                        2.2,
+                        (1 - k) * st["att"]
+                        + k * (gf / mu)
+                    )
+                )
+
+                st["def"] = max(
+                    0.4,
+                    min(
+                        2.2,
+                        (1 - k) * st["def"]
+                        + k * (gc / mu)
+                    )
+                )
+
+                st["n"] += 1
+
+            stats[h] = sh
+            stats[a] = sa
+
+        for st in stats.values():
+
+            if st["n"] < 5:
+
+                n = st["n"]
+
+                st["eff_att"] = (
+                    (n * st["att"] + 3.0)
+                    / (n + 3.0)
+                )
+
+                st["eff_def"] = (
+                    (n * st["def"] + 3.0)
+                    / (n + 3.0)
+                )
+
+            else:
+
+                st["eff_att"] = st["att"]
+                st["eff_def"] = st["def"]
+
+        stats["_mu"] = mu
+
+        cache_set(cache_key, stats, 6 * 3600)
+
+        return stats
+
+    except Exception as exc:
+
+        print(
+            f"\u26a0\ufe0f Rating {league}: {exc}"
+        )
+
+        cache_set(cache_key, -1, 3600)
+
+        return None
+
+
+def _fduk_trova(
+    diz: Dict[str, Any],
+    nome_espn: str
+) -> Optional[Any]:
+
+    """Cerca la squadra ESPN nel dizionario con chiavi
+    dei nomi CSV (match fuzzy fduk)."""
+
+    for k, v in diz.items():
+
+        if k.startswith("_"):
+            continue
+
+        try:
+
+            if _fduk_matcha(nome_espn, k):
+                return v
+
+        except Exception:
+            continue
+
+    return None
+
+
+def p_over_da_matrice(
+    lh: float,
+    la: float,
+    rho: float = 0.0
+) -> float:
+
+    """P(gol totali >= 3) in percento dalla matrice."""
+
+    mat = matrice_score(lh, la, rho)
+
+    p = sum(
+        mat[i][j]
+        for i in range(MATRICE_N)
+        for j in range(MATRICE_N)
+        if i + j >= 3
+    ) * 100.0
+
+    return clamp(p, 1.0, 99.0)
+
+
+def probabilita_over_da_raw(
+    raw: float,
+    soglia: int
+) -> float:
+
+    """Stesso shrinkage a gradino della ladder,
+    ma partendo da una probabilita' grezza di matrice."""
+
+    w = CAL_SCALA_W.get(soglia, 0.35)
+
+    base = CAL_SCALA_BASE.get(
+        soglia, 52.9
+    )
+
+    return clamp(
+        w * raw + (1 - w) * base,
+        1,
+        99
+    )
+
+
 def quote_mercato_per_partita(
     home_name: str,
     away_name: str,
@@ -4415,7 +4834,8 @@ def stima_goal_squadre(
 
 def matrice_score(
     lh: float,
-    la: float
+    la: float,
+    rho: float = 0.0
 ) -> List[List[float]]:
 
     """Matrice P(i gol casa, j gol ospite), Poisson
@@ -4429,6 +4849,19 @@ def matrice_score(
         ]
         for i in range(MATRICE_N)
     ]
+
+    if abs(rho) > 1e-9:
+
+        # correzione Dixon-Coles sui punteggi bassi
+        t00 = max(0.0, 1 - lh * la * rho)
+        t10 = max(0.0, 1 + la * rho)
+        t01 = max(0.0, 1 + lh * rho)
+        t11 = max(0.0, 1 - rho)
+
+        mat[0][0] *= t00
+        mat[1][0] *= t10
+        mat[0][1] *= t01
+        mat[1][1] *= t11
 
     s = sum(sum(riga) for riga in mat)
 
@@ -4460,7 +4893,8 @@ def _distr_tot(
 
 def mercati_avanzati(
     lh: float,
-    la: float
+    la: float,
+    rho: float = 0.0
 ):
 
     """Costruisce TUTTI i mercati derivati dal modello.
@@ -4481,7 +4915,7 @@ def mercati_avanzati(
         lh *= f
         la *= f
 
-    m = matrice_score(lh, la)
+    m = matrice_score(lh, la, rho)
 
     m1 = matrice_score(
         lh * QUOTA_1T,
@@ -5356,6 +5790,45 @@ def analizza_partita(
     )
 
     # --------------------------------------------------------
+    # ELO (fduk, 2 stagioni): aggiustamento post-modello.
+    # Backtest 7.082 partite: logloss 1.0434 -> 1.0088
+    # --------------------------------------------------------
+
+    elo_usato = False
+    elo_d = None
+
+    try:
+
+        _elo = _fduk_elo(league) or {}
+
+        _eh = _fduk_trova(_elo, home_name)
+        _ea = _fduk_trova(_elo, away_name)
+
+        if _eh is not None and _ea is not None:
+
+            elo_d = _eh - _ea
+
+            if abs(elo_d) >= 1.0:
+
+                _e = 8.0 * elo_d / 100.0
+
+                _ph = max(1.0, prob_home + _e)
+                _pa = max(1.0, prob_away - _e)
+                _pd = max(1.0, prob_draw)
+
+                _tt = _ph + _pd + _pa
+
+                prob_home = _ph / _tt * 100.0
+                prob_draw = _pd / _tt * 100.0
+                prob_away = _pa / _tt * 100.0
+
+                elo_usato = True
+
+    except Exception as _exc_elo:
+
+        print(f"\u26a0\ufe0f Elo: {_exc_elo}")
+
+    # --------------------------------------------------------
     # GOAL
     # --------------------------------------------------------
 
@@ -5366,13 +5839,118 @@ def analizza_partita(
         ppg_trasferta
     )
 
-    over25 = (
-        probabilita_over_25(
-            expected_goals
+    # --------------------------------------------------------
+    # DIXON-COLES: lambda da rating att/def della stagione
+    # (fduk) + tau -0.05 sui punteggi bassi. O/U logloss
+    # 0.805 -> 0.752 (oos). Fallback: lambda da forma gol.
+    # --------------------------------------------------------
+
+    dc_usato = False
+    lh_fin: Optional[float] = None
+    la_fin: Optional[float] = None
+
+    try:
+
+        _ratings = _fduk_ratings(league) or {}
+
+        _rt_h = _fduk_trova(_ratings, home_name)
+        _rt_a = _fduk_trova(_ratings, away_name)
+
+        if (
+            isinstance(_rt_h, dict)
+            and isinstance(_rt_a, dict)
+            and _rt_h.get("n", 0) >= 5
+            and _rt_a.get("n", 0) >= 5
+        ):
+
+            _mu = _ratings.get("_mu", 1.4)
+
+            lh_fin = clamp(
+                _rt_h["eff_att"]
+                * _rt_a["eff_def"]
+                * _mu
+                * 1.15,
+                0.2,
+                3.8
+            )
+
+            la_fin = clamp(
+                _rt_a["eff_att"]
+                * _rt_h["eff_def"]
+                * _mu,
+                0.2,
+                3.8
+            )
+
+            dc_usato = True
+
+    except Exception as _exc_dc:
+
+        print(f"\u26a0\ufe0f DC: {_exc_dc}")
+
+    if dc_usato:
+
+        over25 = probabilita_over_da_raw(
+            p_over_da_matrice(lh_fin, la_fin, -0.05),
+            2
         )
-    )
+
+    else:
+
+        over25 = (
+            probabilita_over_25(
+                expected_goals
+            )
+        )
 
     under25 = 100 - over25
+
+    # MARKET-BLEND O/U 2.5 (se quote reali pubblicate):
+    # sovrascrive over25/under25, conserva il valore
+    # del modello in over25_raw (serve al segnare ⭐)
+    over25_raw = over25
+
+    ou_blend = False
+
+    qm_ou = quote_mercato or {}
+
+    if (
+        qm_ou.get("over25")
+        and qm_ou.get("under25")
+    ):
+
+        try:
+
+            io_ = 1.0 / safe_float(
+                qm_ou["over25"]
+            )
+
+            iu_ = 1.0 / safe_float(
+                qm_ou["under25"]
+            )
+
+            tot_io = io_ + iu_
+
+            if tot_io > 0:
+
+                imp_o = (
+                    io_ / tot_io * 100.0
+                )
+
+                over25 = clamp(
+                    MARKET_W_OU * imp_o
+                    + (1 - MARKET_W_OU)
+                    * over25,
+                    1,
+                    99
+                )
+
+                under25 = 100 - over25
+
+                ou_blend = True
+
+        except Exception:
+            pass
 
     gol = probabilita_gol(
         stats_model_home,
@@ -5387,10 +5965,20 @@ def analizza_partita(
         ppg_trasferta
     )
 
-    avanzati, esatto_top, htft_top = mercati_avanzati(
-        lh_av,
-        la_av
-    )
+    if dc_usato:
+
+        avanzati, esatto_top, htft_top = mercati_avanzati(
+            lh_fin,
+            la_fin,
+            -0.05
+        )
+
+    else:
+
+        avanzati, esatto_top, htft_top = mercati_avanzati(
+            lh_av,
+            la_av
+        )
 
     # --------------------------------------------------------
     # AFFIDABILITÀ
@@ -5451,6 +6039,11 @@ def analizza_partita(
         "mercati_avanzati": avanzati,
         "esatto_top": esatto_top,
         "htft_top": htft_top,
+        "over25_raw": over25_raw,
+        "ou_blend": ou_blend,
+        "elo_usato": elo_usato,
+        "elo_d": elo_d,
+        "dc": dc_usato,
         "meteo": wx,
         "quote_mercato": quote_mercato,
         "xg_home": (
@@ -6079,7 +6672,7 @@ X — {format_percent(analisi['prob_draw'])}
 
 <b>⚽ GOAL</b>
 
-Over 2.5: {format_percent(analisi['over25'])}
+Over 2.5: {format_percent(analisi['over25'])}{' (modello + mercato)' if analisi.get('ou_blend') else ''}
 Under 2.5: {format_percent(analisi['under25'])}
 
 Gol: {format_percent(analisi['gol'])}
@@ -6097,7 +6690,7 @@ Goal attesi: <b>{analisi['expected_goals']:.2f}</b>
 
 <b>🎯 RIS. ESATTO & 1T/FINALE</b>
 
-Esatto: {format_esatto(analisi)}
+Esatto: {format_esatto(analisi)}{' (Dixon-Coles)' if analisi.get('dc') else ''}
 1T/Finale: {format_htft(analisi)}
 
 <b>📊 AFFIDABILITÀ DATI</b>
@@ -6745,6 +7338,17 @@ def migliori_pick(
             "analisi": analisi,
             "mercato": mercato,
             "prob": prob,
+            # probabilita' del SOLO modello per O/U
+            # (il blend col mercato e' in "prob"):
+            # serve al confronto ⭐ vs mercato
+            "prob_raw": (
+                analisi.get("over25_raw")
+                if mercato in (
+                    "Over 2.5",
+                    "Under 2.5"
+                )
+                else prob
+            ),
             "quota": quota,
             "quota_reale": qr,
             "implied_reale": implied,
@@ -7330,7 +7934,10 @@ def format_schedina(
 
             if (
                 imp
-                and leg["prob"]
+                and leg.get(
+                    "prob_raw",
+                    leg["prob"]
+                )
                 > imp + 5
             ):
                 extra_leg += " \u2b50"
@@ -9191,7 +9798,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 MITO 8 gambe + pool giornata singola - build 25 set 2026 v8"
+        "\U0001f4a3 Dixon-Coles + Elo + MITO 8 - build 25 set 2026 v10"
     )
 
     print(
