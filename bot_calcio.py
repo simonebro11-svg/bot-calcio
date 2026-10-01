@@ -3357,6 +3357,313 @@ def _fduk_anno_corrente() -> int:
     )
 
 
+def _poisson_over_stat(
+    lam: float,
+    linea: int
+) -> float:
+
+    """P(stato > linea) con Poisson PULITA:
+    serve per corner/cartellini/tiri, dove la
+    calibrazione a gradini dei GOL non vale."""
+
+    under = 0.0
+
+    for i in range(linea + 1):
+        under += poisson_prob(lam, i)
+
+    return clamp(
+        (1.0 - under) * 100.0,
+        0.5,
+        99.5
+    )
+
+
+def _fduk_stats_lega(
+    league: str
+) -> Optional[Dict[str, Any]]:
+
+    """Corner/cartellini/tiri fatti e subiti di
+    ogni squadra dalla stagione in corso (CSV
+    football-data.co.uk). Cache 6h, negativa 1h."""
+
+    cache_key = f"fduk_stats_{league}"
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    try:
+
+        anno = _fduk_anno_corrente()
+
+        url = _fduk_url_anno(league, anno)
+
+        if not url:
+            cache_set(cache_key, -1, 3600)
+            return None
+
+        r = requests.get(url, timeout=15)
+
+        if r.status_code != 200:
+            cache_set(cache_key, -1, 3600)
+            return None
+
+        import csv as _csv
+        import io as _io
+
+        squadre: Dict[str, Dict[str, float]] = {}
+
+        for riga in _csv.DictReader(
+            _io.StringIO(
+                r.content.decode("utf-8-sig")
+            )
+        ):
+
+            try:
+
+                hc = float(riga["HC"])
+                ac = float(riga["AC"])
+                hs = float(riga["HS"])
+                as_ = float(riga["AS"])
+                hy = float(riga["HY"])
+                ay = float(riga["AY"])
+                hr = float(riga.get("HR") or 0)
+                ar = float(riga.get("AR") or 0)
+
+            except (
+                KeyError,
+                ValueError,
+                TypeError
+            ):
+                continue
+
+            for (nome, cf, ca, yf, rf, sf, sa) in (
+                (
+                    riga.get("HomeTeam"),
+                    hc, ac, hy, hr, hs, as_
+                ),
+                (
+                    riga.get("AwayTeam"),
+                    ac, hc, ay, ar, as_, hs
+                )
+            ):
+
+                if not nome:
+                    continue
+
+                s = squadre.setdefault(
+                    nome,
+                    {
+                        "n": 0.0, "cf": 0.0,
+                        "ca": 0.0, "yf": 0.0,
+                        "rf": 0.0, "sf": 0.0,
+                        "sa": 0.0
+                    }
+                )
+
+                s["n"] += 1
+                s["cf"] += cf
+                s["ca"] += ca
+                s["yf"] += yf
+                s["rf"] += rf
+                s["sf"] += sf
+                s["sa"] += sa
+
+        tot_n = sum(
+            s["n"] for s in squadre.values()
+        )
+
+        if tot_n < 20 or not squadre:
+            cache_set(cache_key, -1, 3600)
+            return None
+
+        lg = {
+            "corner": sum(
+                s["cf"] for s in squadre.values()
+            ) / tot_n,
+            "cartellini": (
+                sum(
+                    s["yf"] for s in
+                    squadre.values()
+                )
+                + sum(
+                    s["rf"] for s in
+                    squadre.values()
+                )
+            ) / tot_n,
+            "tiri": sum(
+                s["sf"] for s in squadre.values()
+            ) / tot_n
+        }
+
+        out = {
+            "squadre": squadre,
+            "lg": lg
+        }
+
+        cache_set(cache_key, out, 21600)
+
+        return out
+
+    except Exception:
+
+        cache_set(cache_key, -1, 3600)
+
+        return None
+
+
+def _stat_mercati(
+    league: str,
+    home: str,
+    away: str
+) -> tuple:
+
+    """Mercati SPECIALE (corner/cartellini/tiri)
+    per la partita: medie squadra shrinkate verso
+    la media lega + Poisson pulita sulle linee
+    attorno all'atteso. Ritorna ({nome: prob},
+    partite_minime_usate)."""
+
+    try:
+
+        st = _fduk_stats_lega(league)
+
+        if not st:
+            return {}, 0
+
+        squadre = st["squadre"]
+        lg = st["lg"]
+
+        fh = fa = None
+
+        for nome in squadre:
+
+            if (
+                fh is None
+                and _fduk_matcha(home, nome)
+            ):
+                fh = nome
+
+            if (
+                fa is None
+                and _fduk_matcha(away, nome)
+            ):
+                fa = nome
+
+        if not fh or not fa or fh == fa:
+            return {}, 0
+
+        def rate(
+            nome: str,
+            chiave: str,
+            base: float
+        ) -> float:
+
+            s = squadre[nome]
+            n = s["n"]
+
+            if chiave == "cartellini":
+                grezzo = (
+                    (s["yf"] + s["rf"]) / n
+                )
+            else:
+                grezzo = s[chiave] / n
+
+            k = 5.0
+
+            return (
+                (n * grezzo + k * base)
+                / (n + k)
+            )
+
+        c_h = (
+            rate(fh, "cf", lg["corner"])
+            + rate(fa, "ca", lg["corner"])
+        ) / 2.0
+
+        c_a = (
+            rate(fa, "cf", lg["corner"])
+            + rate(fh, "ca", lg["corner"])
+        ) / 2.0
+
+        s_h = (
+            rate(fh, "sf", lg["tiri"])
+            + rate(fa, "sa", lg["tiri"])
+        ) / 2.0
+
+        s_a = (
+            rate(fa, "sf", lg["tiri"])
+            + rate(fh, "sa", lg["tiri"])
+        ) / 2.0
+
+        y_h = rate(
+            fh, "cartellini", lg["cartellini"]
+        )
+        y_a = rate(
+            fa, "cartellini", lg["cartellini"]
+        )
+
+        attesi = {
+            "corner": c_h + c_a,
+            "cartellini": y_h + y_a,
+            "tiri": s_h + s_a
+        }
+
+        n_min = int(
+            min(
+                squadre[fh]["n"],
+                squadre[fa]["n"]
+            )
+        )
+
+        mercati: Dict[str, float] = {}
+
+        for cat, lam in attesi.items():
+
+            if lam <= 0.5:
+                continue
+
+            base = int(math.floor(lam))
+
+            for delta in (-2, -1, 0, 1, 2):
+
+                linea = base + delta
+
+                if linea < 1:
+                    continue
+
+                over = _poisson_over_stat(
+                    lam, linea
+                )
+
+                mercati[
+                    f"Over {linea}.5 {cat}"
+                ] = over
+
+                mercati[
+                    f"Under {linea}.5 {cat}"
+                ] = 100.0 - over
+
+        aff = int(
+            clamp(
+                38.0 + 4.5 * n_min,
+                45,
+                68
+            )
+        )
+
+        return mercati, aff
+
+    except Exception:
+
+        return {}, 0
+
+
 def _fduk_url_anno(
     league: str,
     anno: int
@@ -6733,6 +7040,10 @@ def analizza_partita(
         key=mercati.get
     )
 
+    spec_mercati, spec_aff = _stat_mercati(
+        league, home_name, away_name
+    )
+
     return {
         "evento": evento,
         "home": home_name,
@@ -6753,6 +7064,8 @@ def analizza_partita(
         "europe_home": europe_home,
         "europe_away": europe_away,
         "mercati_avanzati": avanzati,
+        "mercati_speciale": spec_mercati,
+        "affidabilita_speciale": spec_aff,
         "esatto_top": esatto_top,
         "htft_top": htft_top,
         "over25_raw": over25_raw,
@@ -7689,9 +8002,10 @@ def crea_report(
     righe.append(
         "ℹ️ <i>Mercati avanzati (1T/2T, handicap, "
         "multigol, esatti): stime Poisson calibrate "
-        "su 250 partite 2026-27. Sanzioni/cartellini "
-        "esclusi: nessuna fonte gratuita "
-        "affidabile.</i>"
+        "su 250 partite 2026-27. Corner/cartellini/"
+        "tiri (schedina SPECIALE): stime dalle medie "
+        "stagionali football-data.co.uk, solo 5 "
+        "campionati.</i>"
     )
 
     parti.append(
@@ -7851,7 +8165,7 @@ def invia_report(
 # ============================================================
 # SCHEDINE
 #
-# Cinque schedine pronte costruite sulle partite con
+# Sei schedine pronte costruite sulle partite con
 # affidabilità più alta di TUTTI i campionati in elenco.
 # Ogni schedina deve cadere nella SUA fascia di quota:
 #   🎟 SICURA      quota 8-15   (affidabilità migliore)
@@ -7859,6 +8173,8 @@ def invia_report(
 #   🔥 AUDACE      quota 40-45
 #   💣 MITO        quota 60-80
 #   💎 TOP         quota 150-200 (qualsiasi evento del pool)
+#   🎯 SPECIALE    quota 20-30 (SOLO corner/cartellini/tiri,
+#                  stime dalle medie stagionali fduk)
 # Per ogni partita si possono usare TUTTI i mercati; la quota
 # e' stimata con payout 94%. La combinazione si cerca con una
 # beam search che massimizza la probabilita' complessiva
@@ -7981,7 +8297,8 @@ def migliore_pick(
 
 def migliori_pick(
     analisi: Dict[str, Any],
-    max_pick: int = 2
+    max_pick: int = 2,
+    solo_speciale: bool = False
 ) -> List[Dict[str, Any]]:
 
     """Fino a max_pick mercati giocabili per la partita
@@ -8043,6 +8360,14 @@ def migliori_pick(
     ) or {}
 
     mercati.update(avanzati)
+
+    # schedina SPECIALE: SOLO corner/cartellini/tiri
+    if solo_speciale:
+
+        mercati = dict(
+            analisi.get("mercati_speciale")
+            or {}
+        )
 
     ordine = sorted(
         mercati.items(),
@@ -8188,7 +8513,11 @@ def migliori_pick(
             "quota_reale": qr,
             "implied_reale": implied,
             "aff": safe_int(
-                analisi.get("affidabilita")
+                analisi.get(
+                    "affidabilita_speciale"
+                    if solo_speciale
+                    else "affidabilita"
+                )
             ),
             "match_key": match_key
         })
@@ -8288,6 +8617,15 @@ TIERS_SCHEDINE = [
         "candidati": 40,
         "prob_min": 0.08,
         "max_legs": 14
+    },
+    {
+        "nome": "🎯 SCHEDINA SPECIALE",
+        "pav": 20.0,
+        "cap": 30.0,
+        "candidati": 40,
+        "prob_min": 0.25,
+        "max_legs": 8,
+        "pool": "speciale"
     }
 ]
 
@@ -8728,6 +9066,7 @@ def crea_schedine(
     print("=" * 50)
 
     pool = []
+    pool_speciale = []
 
     if slugs:
 
@@ -8945,6 +9284,19 @@ def crea_schedine(
 
             pool.extend(selezionati)
 
+            # pool SPECIALE: SOLO corner/cartellini/
+            # tiri (esistono solo per i 5 campionati
+            # fduk; altrove resta vuoto e la schedina
+            # SPECIALE non viene costruita)
+            pool_speciale.extend(
+                p for p in migliori_pick(
+                    analisi,
+                    max_pick=99,
+                    solo_speciale=True
+                )
+                if p["quota"] >= QUOTA_GAMBA_MIN
+            )
+
         if on_progress:
 
             on_progress(
@@ -8986,6 +9338,15 @@ def crea_schedine(
         )
     )
 
+    picks_spec_ordinate = sorted(
+        pool_speciale,
+        key=lambda p: (
+            -p["aff"],
+            -p["quota"],
+            -p["prob"]
+        )
+    )
+
     schedine = []
 
     for tier in TIERS_SCHEDINE:
@@ -8994,7 +9355,12 @@ def crea_schedine(
 
             s = costruisci_schedina(
                 tier,
-                picks_ordinate
+                (
+                    picks_spec_ordinate
+                    if tier.get("pool")
+                    == "speciale"
+                    else picks_ordinate
+                )
             )
 
         except Exception as exc:
@@ -9169,6 +9535,13 @@ def crea_menu_campionati():
         )
     )
 
+    markup.row(
+        types.InlineKeyboardButton(
+            "🎯 SPECIALE 20-30",
+            callback_data="schedina:30"
+        )
+    )
+
     return markup
 
 
@@ -9302,7 +9675,7 @@ Il bot elaborerà:
 • Gol/No Gol
 • goal attesi
 • affidabilità dei dati
-• 🎟 schedine pronte: SICURA (8-15), EQUILIBRATA (20-25), AUDACE (40-45), MITO (60-80), TOP (150-200)
+• 🎟 schedine pronte: SICURA (8-15), EQUILIBRATA (20-25), AUDACE (40-45), MITO (60-80), TOP (150-200), SPECIALE (20-30, solo corner/cartellini/tiri)
 • 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche\n• 🌍 Nazionali e 🏆 Champions/Europa: sottomenu con report e le stesse 5 schedine
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
@@ -10568,7 +10941,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico (minuti in nazionale) + schedine affidabili - build 25 set 2026 v15"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico + 6 schedine (inclusa SPECIALE corner/cartellini/tiri) - build 25 set 2026 v16"
     )
 
     print(
