@@ -4395,8 +4395,10 @@ TRASFERTE_MAX = 14
 # le nazionali stesse il concetto non si applica.
 RADUNO_GIORNI = 12
 RADUNO_CALL_MAX = 100
-RIENTRI_FATICA = 2
-RIENTRI_FATICA_MAX = 10
+# Carico rientri = somma dei punti-minuto dei
+# propri titolari nel raduno (3/2/1 per gara);
+# entra in fatica con tetto per squadra:
+RIENTRI_FATICA_MAX = 12
 
 
 def bonus_trasferte(
@@ -4469,7 +4471,7 @@ _RADUNO_LOCK = threading.Lock()
 _STARTERS_LOCK = threading.Lock()
 
 
-def _raduno_nomi() -> set:
+def _raduno_nomi() -> dict:
 
     """Nomi (normalizzati) dei titolari usati nelle
     partite delle nazionali negli ultimi RADUNO_GIORNI
@@ -4487,7 +4489,7 @@ def _raduno_nomi() -> set:
         return (
             cached
             if cached != -1
-            else set()
+            else {}
         )
 
     with _RADUNO_LOCK:
@@ -4498,13 +4500,13 @@ def _raduno_nomi() -> set:
             return (
                 cached
                 if cached != -1
-                else set()
+                else {}
             )
 
         return _raduno_nomi_build(cache_key)
 
 
-def _raduno_nomi_build(cache_key: str) -> set:
+def _raduno_nomi_build(cache_key: str) -> dict:
 
     try:
 
@@ -4668,7 +4670,11 @@ def _raduno_nomi_build(cache_key: str) -> set:
             bordo = list(nuovi.keys())
 
         # 3) summary -> titolari
-        nomi: set = set()
+        # nome normalizzato -> carico raduno
+        # (punti-minuto: 3 titolare intera gara,
+        #  2 titolare sostituito, 1 sub entrato;
+        #  sommato su TUTTE le gare della finestra)
+        nomi: dict = {}
 
         chiamate = 0
 
@@ -4697,7 +4703,26 @@ def _raduno_nomi_build(cache_key: str) -> set:
                     r.get("roster") or []
                 ):
 
-                    if not v.get("starter"):
+                    # carico per RUOLO IN GARA (proxy
+                    # dei minuti, che ESPN non espone
+                    # per il calcio): titolare non
+                    # sostituito ~90' -> 3, titolare
+                    # sostituito ~65' -> 2, sub
+                    # entrato ~20' -> 1, convocato
+                    # non entrato -> 0 (nessun carico)
+                    if v.get("starter"):
+
+                        punti = (
+                            2.0
+                            if v.get("subbedOut")
+                            else 3.0
+                        )
+
+                    elif v.get("subbedIn"):
+
+                        punti = 1.0
+
+                    else:
                         continue
 
                     nome = normalizza_nome(
@@ -4713,13 +4738,16 @@ def _raduno_nomi_build(cache_key: str) -> set:
                     )
 
                     if nome:
-                        nomi.add(nome)
+                        nomi[nome] = (
+                            nomi.get(nome, 0.0)
+                            + punti
+                        )
 
         if chiamate == 0:
 
             cache_set(cache_key, -1, 300)
 
-            return set()
+            return {}
 
         # raduno FINITO (nessuna gara nelle ultime 30h):
         # il set non cambia piu' -> cache lunga per
@@ -4754,7 +4782,7 @@ def _raduno_nomi_build(cache_key: str) -> set:
 
         cache_set(cache_key, -1, 300)
 
-        return set()
+        return {}
 
 
 def _starters_ultima(
@@ -6349,6 +6377,8 @@ def analizza_partita(
     # (solo club: per le nazionali non ha senso)
     rientri_home = 0
     rientri_away = 0
+    carico_home = 0
+    carico_away = 0
 
     try:
 
@@ -6369,14 +6399,44 @@ def analizza_partita(
                     away_id, league
                 )
 
+                # rientro = titolare dell'ultima
+                # partita di club presente nel
+                # raduno; il carico e' la somma dei
+                # suoi punti-minuto (3/2/1 per gara)
                 if sh_st:
+
+                    inter_h = (
+                        sh_st
+                        & nomi_raduno.keys()
+                    )
+
                     rientri_home = len(
-                        sh_st & nomi_raduno
+                        inter_h
+                    )
+
+                    carico_home = int(
+                        sum(
+                            nomi_raduno[n]
+                            for n in inter_h
+                        )
                     )
 
                 if sa_st:
+
+                    inter_a = (
+                        sa_st
+                        & nomi_raduno.keys()
+                    )
+
                     rientri_away = len(
-                        sa_st & nomi_raduno
+                        inter_a
+                    )
+
+                    carico_away = int(
+                        sum(
+                            nomi_raduno[n]
+                            for n in inter_a
+                        )
                     )
 
                 if rientri_home:
@@ -6386,8 +6446,7 @@ def analizza_partita(
                         fatica_home
                         + min(
                             RIENTRI_FATICA_MAX,
-                            rientri_home
-                            * RIENTRI_FATICA
+                            carico_home
                         )
                     )
 
@@ -6398,8 +6457,7 @@ def analizza_partita(
                         fatica_away
                         + min(
                             RIENTRI_FATICA_MAX,
-                            rientri_away
-                            * RIENTRI_FATICA
+                            carico_away
                         )
                     )
 
@@ -6723,6 +6781,8 @@ def analizza_partita(
         "viaggi_away": viaggi_away,
         "rientri_home": rientri_home,
         "rientri_away": rientri_away,
+        "rientri_carico_home": carico_home,
+        "rientri_carico_away": carico_away,
         "momentum_home": momentum_home,
         "momentum_away": momentum_away,
         "prob_home": prob_home,
@@ -7239,6 +7299,9 @@ def format_report_partita(
                 if analisi["rientri_home"] == 1
                 else " titolari"
             )
+            + " (carico raduno "
+            + str(analisi.get("rientri_carico_home", 0))
+            + ")"
         )
 
     rientri_txt_away = ""
@@ -7253,6 +7316,9 @@ def format_report_partita(
                 if analisi["rientri_away"] == 1
                 else " titolari"
             )
+            + " (carico raduno "
+            + str(analisi.get("rientri_carico_away", 0))
+            + ")"
         )
 
     trasferte_txt_away = ""
@@ -10502,7 +10568,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali + schedine affidabili (blend quote reali, mercati robusti) - build 25 set 2026 v14"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico (minuti in nazionale) + schedine affidabili - build 25 set 2026 v15"
     )
 
     print(
