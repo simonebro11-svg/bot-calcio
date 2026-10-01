@@ -6889,7 +6889,9 @@ def _odds_api_eventi(
 
         eventi = r.json() or []
 
-        cache_set(cache_key, eventi, 7200)
+        # 1 ora: quote fresche al click senza
+        # bruciare i 500 crediti/mese dell'API
+        cache_set(cache_key, eventi, 3600)
 
         return eventi
 
@@ -8020,6 +8022,16 @@ def migliori_pick(
         else None
     )
 
+    # probabilita' 1X2 DEVIGATE dalle quote reali
+    # (servono per il blend delle doppie chance)
+    pi_1 = pi_x = pi_2 = None
+
+    if tot_1:
+
+        pi_1 = 100.0 / (reali["1"] * tot_1)
+        pi_x = 100.0 / (reali["X"] * tot_1)
+        pi_2 = 100.0 / (reali["2"] * tot_1)
+
     picks = []
 
     for mercato, prob in ordine:
@@ -8051,6 +8063,46 @@ def migliori_pick(
             # pagati: sostituisce la stima
             quota = safe_float(qr, quota)
 
+        # probabilita' PRE-blend (serve al segnale
+        # ⭐ "il modello vede valore" nel report)
+        prob_raw = prob
+
+        # blend col mercato reale: per 1/X/2 serve la
+        # loro implied; per le doppie chance basta la
+        # terna 1X2 reale (somma delle devigiate)
+        if (
+            implied is not None
+            and mercato in ("1", "X", "2")
+        ):
+
+            prob = (
+                (1.0 - ODDS_W_1X2) * prob
+                + ODDS_W_1X2 * implied
+            )
+
+        elif (
+            mercato in (
+                "Doppia 1X",
+                "Doppia 12",
+                "Doppia X2"
+            )
+            and pi_1 is not None
+        ):
+
+            if mercato == "Doppia 1X":
+                imp_dc = pi_1 + pi_x
+
+            elif mercato == "Doppia 12":
+                imp_dc = pi_1 + pi_2
+
+            else:
+                imp_dc = pi_x + pi_2
+
+            prob = (
+                (1.0 - ODDS_W_1X2) * prob
+                + ODDS_W_1X2 * imp_dc
+            )
+
         picks.append({
             "analisi": analisi,
             "mercato": mercato,
@@ -8064,7 +8116,7 @@ def migliori_pick(
                     "Over 2.5",
                     "Under 2.5"
                 )
-                else prob
+                else prob_raw
             ),
             "quota": quota,
             "quota_reale": qr,
@@ -8084,6 +8136,48 @@ def migliori_pick(
 # numero di eventi senza pagare il rischio.
 QUOTA_GAMBA_MIN = 1.25
 
+
+# Peso del mercato REALE (quote bookmaker devigiate)
+# nel blend delle probabilita' 1X2/doppie chance:
+# nel backtest oos 2526 il mercato batte il modello
+# sul 1X2 (logloss 0.978 vs 1.009), quindi dove le
+# quote reali esistono pesano 70% e modello 30%.
+ODDS_W_1X2 = 0.7
+
+
+def _mercato_prudente(nome: str) -> bool:
+
+    """Mercati ROBUSTI per le fasce prudenti
+    (SICURA/EQUILIBRATA): esiti e doppie chance,
+    Gol/NoGol, Over/Under a linea piena, Multigol.
+    Fuori i mercati "timing" e combinati (Gol entro
+    il 30', 1T/2T, combo con &, handicap, asiatica,
+    team-total): lì il Poisson è meno calibrato
+    perché dipendono da QUANDO scendono i gol."""
+
+    n = nome.strip()
+
+    if n in (
+        "1", "X", "2",
+        "Gol", "No Gol"
+    ):
+        return True
+
+    if n.startswith("Doppia"):
+        return True
+
+    if n.startswith("Multigol"):
+        return True
+
+    if re.fullmatch(
+        r"(Over|Under) \d+(\.5)?",
+        n
+    ):
+        return True
+
+    return False
+
+
 TIERS_SCHEDINE = [
     {
         "nome": "🎟 SCHEDINA SICURA",
@@ -8092,6 +8186,7 @@ TIERS_SCHEDINE = [
         "candidati": 40,
         "prob_min": 0.40,
         "no_fatica": True,
+        "mercati_prudenti": True,
         "max_legs": 8
     },
     {
@@ -8101,6 +8196,7 @@ TIERS_SCHEDINE = [
         "candidati": 40,
         "prob_min": 0.35,
         "no_fatica": True,
+        "mercati_prudenti": True,
         "max_legs": 8
     },
     {
@@ -8270,6 +8366,16 @@ def costruisci_schedina(
         p for p in candidati
         if p["quota"] >= QUOTA_GAMBA_MIN
     ]
+
+    # fasce prudenti: solo mercati robusti
+    if tier.get("mercati_prudenti"):
+
+        candidati = [
+            p for p in candidati
+            if _mercato_prudente(
+                p["mercato"]
+            )
+        ]
 
     # squadre stanche (riposo < 3 giorni) fuori
     # dalle schedine prudenti
@@ -10396,7 +10502,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali + schedine a fasce (gambe 1.25+) - build 25 set 2026 v13.1"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri nazionali + schedine affidabili (blend quote reali, mercati robusti) - build 25 set 2026 v14"
     )
 
     print(
