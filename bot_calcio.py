@@ -3893,6 +3893,8 @@ def _fduk_ratings(
         ) or []
 
         mu = 1.40
+        mu_h = 1.40
+        mu_a = 1.40
 
         stats: Dict[str, Dict[str, Any]] = {}
 
@@ -3903,12 +3905,26 @@ def _fduk_ratings(
 
             sh = stats.get(
                 h,
-                {"att": 1.0, "def": 1.0, "n": 0}
+                {
+                    "att": 1.0, "def": 1.0,
+                    "n": 0,
+                    "ah": 1.0, "dh": 1.0,
+                    "nh": 0,
+                    "aa": 1.0, "da": 1.0,
+                    "na": 0
+                }
             )
 
             sa = stats.get(
                 a,
-                {"att": 1.0, "def": 1.0, "n": 0}
+                {
+                    "att": 1.0, "def": 1.0,
+                    "n": 0,
+                    "ah": 1.0, "dh": 1.0,
+                    "nh": 0,
+                    "aa": 1.0, "da": 1.0,
+                    "na": 0
+                }
             )
 
             gh = riga["hg"] + 0.0
@@ -3917,6 +3933,16 @@ def _fduk_ratings(
             mu = (
                 0.995 * mu
                 + 0.005 * (gh + ga) / 2.0
+            )
+
+            mu_h = (
+                0.995 * mu_h
+                + 0.005 * gh
+            )
+
+            mu_a = (
+                0.995 * mu_a
+                + 0.005 * ga
             )
 
             k = 0.15
@@ -3946,6 +3972,26 @@ def _fduk_ratings(
 
                 st["n"] += 1
 
+            # SPLIT casa/trasferta (A/B backtest
+            # 2701 partite: O/U -0.32%, 1X2 -0.30%)
+            ks = 0.15
+
+            sh["ah"] = max(
+                0.4, min(2.2, (1 - ks) * sh["ah"] + ks * (gh / mu_h))
+            )
+            sh["dh"] = max(
+                0.4, min(2.2, (1 - ks) * sh["dh"] + ks * (ga / mu_h))
+            )
+            sh["nh"] += 1
+
+            sa["aa"] = max(
+                0.4, min(2.2, (1 - ks) * sa["aa"] + ks * (ga / mu_a))
+            )
+            sa["da"] = max(
+                0.4, min(2.2, (1 - ks) * sa["da"] + ks * (gh / mu_a))
+            )
+            sa["na"] += 1
+
             stats[h] = sh
             stats[a] = sa
 
@@ -3971,6 +4017,8 @@ def _fduk_ratings(
                 st["eff_def"] = st["def"]
 
         stats["_mu"] = mu
+        stats["_mu_h"] = mu_h
+        stats["_mu_a"] = mu_a
 
         cache_set(cache_key, stats, 6 * 3600)
 
@@ -4706,6 +4754,54 @@ RADUNO_CALL_MAX = 100
 # propri titolari nel raduno (3/2/1 per gara);
 # entra in fatica con tetto per squadra:
 RIENTRI_FATICA_MAX = 12
+
+
+def bonus_densita(
+    form: List[Dict[str, Any]],
+    data_evento: Optional[datetime]
+) -> int:
+
+    """Cluster di partite: +4 fatica se la squadra
+    ha gia' giocato 2 gare nei 7 giorni prima
+    dell'evento (la terza della settimana), +1 se
+    ne ha giocata 1. E' il classico " giovedi'
+    Europa + domenica campionato"."""
+
+    if (
+        not form
+        or not data_evento
+    ):
+        return 0
+
+    inizio = (
+        data_evento
+        - timedelta(days=7)
+    )
+
+    n = 0
+
+    for x in form:
+
+        dt = x.get("date")
+
+        if not dt:
+            continue
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        if inizio <= dt < data_evento:
+            n += 1
+
+    if n >= 2:
+        return 4
+
+    if n >= 1:
+        return 1
+
+    return 0
 
 
 def bonus_trasferte(
@@ -6666,6 +6762,7 @@ def analizza_partita(
     fatica_home = min(
         70,
         fatica_home + viaggi_home
+        + bonus_densita(form_home, data_evento)
     )
 
     viaggi_away = bonus_trasferte(
@@ -6677,6 +6774,7 @@ def analizza_partita(
     fatica_away = min(
         70,
         fatica_away + viaggi_away
+        + bonus_densita(form_away, data_evento)
     )
 
     # RIENTRI DA NAZIONALE: titolari del club usati
@@ -6888,14 +6986,51 @@ def analizza_partita(
 
             _mu = _ratings.get("_mu", 1.4)
 
-            lh_fin = clamp(
-                _rt_h["eff_att"]
-                * _rt_a["eff_def"]
-                * _mu
-                * 1.15,
-                0.2,
-                3.8
-            )
+            # SPLIT casa/trasferta se ci sono almeno
+            # 4 gare casalinghe/esterne: lambda = att
+            # della squadra CASA a casa x dif della
+            # OSPITE fuori x media gol CASA IN CASA
+            # della lega (e speculare). A/B backtest
+            # 2701 partite 2425+2526: O/U logloss
+            # -0.32%, 1X2 logloss -0.30% (meglio su
+            # entrambe). Fallback: rating unificati.
+            _nh = _rt_h.get("nh", 0)
+            _na = _rt_a.get("na", 0)
+
+            if _nh >= 4 and _na >= 4:
+
+                def _sr(v, n, kk=4.0):
+                    return (n * v + kk) / (n + kk)
+
+                _mu_h = _ratings.get("_mu_h", _mu)
+                _mu_a = _ratings.get("_mu_a", _mu)
+
+                lh_fin = clamp(
+                    _sr(_rt_h["ah"], _nh)
+                    * _sr(_rt_a["da"], _na)
+                    * _mu_h,
+                    0.2,
+                    3.8
+                )
+
+                la_fin = clamp(
+                    _sr(_rt_a["aa"], _na)
+                    * _sr(_rt_h["dh"], _nh)
+                    * _mu_a,
+                    0.2,
+                    3.8
+                )
+
+            else:
+
+                lh_fin = clamp(
+                    _rt_h["eff_att"]
+                    * _rt_a["eff_def"]
+                    * _mu
+                    * 1.15,
+                    0.2,
+                    3.8
+                )
 
             la_fin = clamp(
                 _rt_a["eff_att"]
@@ -8694,8 +8829,16 @@ def _beam_schedina(
                 if nq > cap:
                     continue
 
+                # tie-break leggero (+1%): a parita'
+                # di probabilita' vince la gamba con
+                # quota REALE del bookmaker (ancorata
+                # al mercato, quindi piu' affidabile)
                 nlp = lp + math.log(
                     p["prob"] / 100.0
+                ) + (
+                    0.01
+                    if p.get("quota_reale")
+                    else 0.0
                 )
 
                 nlegs = legs + (p,)
@@ -10991,7 +11134,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico + 7 schedine (nuova SICURISSIMA 3-4) - build 25 set 2026 v16.2"
+        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + densita' + 7 schedine - build 25 set 2026 v17"
     )
 
     print(
