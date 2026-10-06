@@ -8165,9 +8165,10 @@ def invia_report(
 # ============================================================
 # SCHEDINE
 #
-# Sei schedine pronte costruite sulle partite con
+# Sette schedine pronte costruite sulle partite con
 # affidabilità più alta di TUTTI i campionati in elenco.
 # Ogni schedina deve cadere nella SUA fascia di quota:
+#   🛡️ SICURISSIMA quota 3-4    (solo 2-3 eventi, mercati robusti)
 #   🎟 SICURA      quota 8-15   (affidabilità migliore)
 #   ⚡ EQUILIBRATA quota 20-25
 #   🔥 AUDACE      quota 40-45
@@ -8575,6 +8576,17 @@ def _mercato_prudente(nome: str) -> bool:
 
 TIERS_SCHEDINE = [
     {
+        "nome": "🛡️ SCHEDINA SICURISSIMA",
+        "pav": 3.0,
+        "cap": 4.0,
+        "candidati": 40,
+        "prob_min": 0.45,
+        "no_fatica": True,
+        "mercati_prudenti": True,
+        "min_legs": 2,
+        "max_legs": 3
+    },
+    {
         "nome": "🎟 SCHEDINA SICURA",
         "pav": 8.0,
         "cap": 15.0,
@@ -8634,7 +8646,8 @@ def _beam_schedina(
     candidati: List[Dict[str, Any]],
     pav: float,
     cap: float,
-    max_legs: int
+    max_legs: int,
+    min_legs: int = 1
 ) -> Optional[tuple]:
 
     """Ricerca a fascio (beam search) della
@@ -8689,10 +8702,16 @@ def _beam_schedina(
 
                 if nq >= pav:
 
-                    # in fascia: terminale
+                    # in fascia: terminale (solo se
+                    # ha abbastanza gambe: es. la
+                    # SICURISSIMA richiede 2-3 eventi,
+                    # una gamba sola non vale)
                     if (
-                        best is None
-                        or nlp > best[0]
+                        len(nlegs) >= min_legs
+                        and (
+                            best is None
+                            or nlp > best[0]
+                        )
                     ):
                         best = (nlp, nlegs, nq)
 
@@ -8853,7 +8872,8 @@ def costruisci_schedina(
         candidati,
         tier["pav"],
         tier["cap"],
-        tier["max_legs"]
+        tier["max_legs"],
+        tier.get("min_legs", 1)
     )
 
     if not best:
@@ -9534,27 +9554,31 @@ def crea_menu_campionati():
 
     markup.row(
         types.InlineKeyboardButton(
+            "🛡️ SICURISSIMA 3-4",
+            callback_data="schedina:4"
+        ),
+        types.InlineKeyboardButton(
             "🎟 SICURA 8-15",
             callback_data="schedina:15"
-        ),
+        )
+    )
+
+    markup.row(
         types.InlineKeyboardButton(
             "⚡ EQUILIBRATA 20-25",
             callback_data="schedina:25"
-        )
-    )
-
-    markup.row(
+        ),
         types.InlineKeyboardButton(
             "🔥 AUDACE 40-45",
             callback_data="schedina:45"
-        ),
-        types.InlineKeyboardButton(
-            "💣 MITO 60-80",
-            callback_data="schedina:80"
         )
     )
 
     markup.row(
+        types.InlineKeyboardButton(
+            "💣 MITO 60-80",
+            callback_data="schedina:80"
+        ),
         types.InlineKeyboardButton(
             "💎 TOP 150-200",
             callback_data="schedina:200"
@@ -9701,7 +9725,7 @@ Il bot elaborerà:
 • Gol/No Gol
 • goal attesi
 • affidabilità dei dati
-• 🎟 schedine pronte: SICURA (8-15), EQUILIBRATA (20-25), AUDACE (40-45), MITO (60-80), TOP (150-200), SPECIALE (20-30, solo corner/cartellini/tiri)
+• 🎟 schedine pronte: SICURISSIMA (3-4, 2-3 eventi), SICURA (8-15), EQUILIBRATA (20-25), AUDACE (40-45), MITO (60-80), TOP (150-200), SPECIALE (20-30, solo corner/cartellini/tiri)
 • 📰 notizie reali di squadra (Google News) con avvisi infortuni/squalifiche\n• 🌍 Nazionali e 🏆 Champions/Europa: sottomenu con report e le stesse 5 schedine
 
 <i>Le percentuali sono stime statistiche e non garantiscono il risultato.</i>
@@ -10967,7 +10991,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico + 6 schedine (mercati robusti dove il modello non e' calibrato) - build 25 set 2026 v16.1"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico + 7 schedine (nuova SICURISSIMA 3-4) - build 25 set 2026 v16.2"
     )
 
     print(
