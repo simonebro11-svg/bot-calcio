@@ -11424,11 +11424,43 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + avvisi cartellini/clima - build 25 set 2026 v17.1"
+        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + avvisi cartellini/clima + log chiavi - build 25 set 2026 v17.2"
     )
 
     print(
         "Avvio applicazione Render..."
+    )
+
+    # diagnostica chiavi: cosi' nei log si vede
+    # SEMPRE quali integrazioni esterne sono
+    # attive (evita variabili con nome sbagliato)
+    print(
+        "\U0001f3e5 football-data.org: "
+        + (
+            "ATTIVA (infortuni/squalificati)"
+            if FOOTBALL_DATA_API_KEY
+            else "chiave ASSENTE (il bot legge"
+            " FOOTBALL_DATA_API_KEY, non"
+            " FOOTBALL_API_KEY)"
+        )
+    )
+
+    print(
+        "\U0001f4b0 The Odds API: "
+        + (
+            "ATTIVA (quote reali)"
+            if THE_ODDS_API_KEY
+            else "chiave ASSENTE (quote stimate)"
+        )
+    )
+
+    print(
+        "\U0001f7e8 API-Football: "
+        + (
+            "ATTIVA (cartellini a rischio)"
+            if API_FOOTBALL_KEY
+            else "chiave ASSENTE"
+        )
     )
 
     print("=" * 50)
