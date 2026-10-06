@@ -9049,6 +9049,15 @@ def format_schedina(
         "modo responsabile.</i>"
     )
 
+    if schedina.get("aff_media", 65) < 58:
+
+        righe.append(
+            "\u26a0\ufe0f <i>Dati poco affidabili in "
+            "questa schedina (partite senza modello "
+            "calibrato): stime meno solide dei "
+            "campionati club.</i>"
+        )
+
     return "\n".join(righe)
 
 
@@ -9269,7 +9278,24 @@ def crea_schedine(
             visti_m = set()
             selezionati = []
 
+            # partite SENZA motore calibrato (nazionali,
+            # primi turni club senza dati fduk): solo
+            # mercati robusti. I timing (1T/2T), le
+            # combo "&" e le asiatiche escono da una
+            # Poisson non calibrata: hanno bruciato le
+            # schedine nazionali (Grecia-Germania 0-0
+            # su "2T Over 0.5")
+            solo_robusti = not analisi.get("dc")
+
             for p in top_prob + mid + top_quota:
+
+                if (
+                    solo_robusti
+                    and not _mercato_prudente(
+                        p["mercato"]
+                    )
+                ):
+                    continue
 
                 k = (
                     p["match_key"],
@@ -10941,7 +10967,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico + 6 schedine (inclusa SPECIALE corner/cartellini/tiri) - build 25 set 2026 v16"
+        "\U0001f4a3 Dixon-Coles + Elo + rientri a carico + 6 schedine (mercati robusti dove il modello non e' calibrato) - build 25 set 2026 v16.1"
     )
 
     print(
