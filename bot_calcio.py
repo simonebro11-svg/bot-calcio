@@ -4326,7 +4326,14 @@ NOTIZIE_FLAG_PAROLE = (
     "condann",
     "rottura",
     "stop per",
-    "fuori per"
+    "fuori per",
+    # clima societario / dirigenza (solo AVVISI:
+    # le notizie non modificano le probabilita')
+    "esonero",
+    "esonerato",
+    "crisi societaria",
+    "malumori",
+    "tensioni"
 )
 
 NOTIZIE_MAX_ORE = 96
@@ -6627,6 +6634,14 @@ def analizza_partita(
         league
     )
 
+    afb_home: list = _afb_cartellini(
+        league, home_name
+    )
+
+    afb_away: list = _afb_cartellini(
+        league, away_name
+    )
+
     injuries_home = (
         fd_inj_home
         if fd_inj_home is not None
@@ -7195,6 +7210,10 @@ def analizza_partita(
         "lp_away": lp_away,
         "injuries_home": injuries_home,
         "injuries_away": injuries_away,
+        "afb_home": afb_home,
+        "afb_away": afb_away,
+        "afb_home": afb_home,
+        "afb_away": afb_away,
         "h2h": h2h,
         "europe_home": europe_home,
         "europe_away": europe_away,
@@ -7488,6 +7507,248 @@ def _odds_api_migliori(
     return best
 
 
+# ------------------------------------------------------------
+# API-FOOTBALL (opzionale, piano FREE 100 richieste/giorno):
+# cartellini stagionali per giocatore -> avviso "a rischio
+# squalifica" nel report. Richiede la chiave gratuita nella
+# variabile d'ambiente API_FOOTBALL_KEY (come THE_ODDS_API_KEY).
+# Budget: max 40 pagine giocatori/giorno (cache squadra 24h,
+# elenco squadre per lega 7 giorni) per restare ben sotto quota.
+# ------------------------------------------------------------
+
+API_FOOTBALL_KEY = os.getenv(
+    "API_FOOTBALL_KEY",
+    ""
+)
+
+AFB_BASE = "https://v3.football.api-sports.io"
+
+AFB_LEAGUE_IDS = {
+    "ita.1": 135,
+    "eng.1": 39,
+    "ger.1": 78,
+    "esp.1": 140,
+    "fra.1": 61
+}
+
+AFB_MAX_GIORNO = 40
+
+
+def _afb_get(
+    path: str,
+    params: Dict[str, Any],
+    cache_key: str,
+    ttl: int,
+    budget: bool = False
+) -> Optional[list]:
+
+    """GET verso API-Football con cache e (opzionale)
+    tetto giornaliero di richieste. None = chiave
+    assente / errore / budget esaurito."""
+
+    if not API_FOOTBALL_KEY:
+        return None
+
+    cached = cache_get(cache_key)
+
+    if cached is not None:
+        return (
+            cached
+            if cached != -1
+            else None
+        )
+
+    if budget:
+
+        oggi_k = (
+            "afb_q_"
+            + datetime.now(timezone.utc).strftime(
+                "%Y%m%d"
+            )
+        )
+
+        usate = cache_get(oggi_k) or 0
+
+        if usate >= AFB_MAX_GIORNO:
+
+            print(
+                "\u23f8\ufe0f API-Football: budget "
+                "giornaliero esaurito"
+            )
+
+            cache_set(cache_key, -1, 6 * 3600)
+
+            return None
+
+    try:
+
+        r = requests.get(
+            f"{AFB_BASE}/{path.lstrip('/')}",
+            params=params,
+            headers={
+                "x-apisports-key": API_FOOTBALL_KEY
+            },
+            timeout=15
+        )
+
+        if budget:
+            cache_set(
+                oggi_k,
+                (cache_get(oggi_k) or 0) + 1,
+                86400
+            )
+
+        if r.status_code != 200:
+            cache_set(cache_key, -1, 1800)
+            return None
+
+        j = r.json()
+
+        if j.get("errors"):
+            cache_set(cache_key, -1, 1800)
+            return None
+
+        resp = j.get("response") or []
+
+        cache_set(cache_key, resp, ttl)
+
+        return resp
+
+    except Exception:
+
+        cache_set(cache_key, -1, 1800)
+
+        return None
+
+
+def _afb_cartellini(
+    league: str,
+    team_name: str
+) -> list:
+
+    """Giocatori della squadra 'a rischio squalifica'
+    (gialli >= 4 oppure almeno 1 rosso) dalla stagione
+    in corso. Cache 24h per squadra; elenco squadre
+    per lega cache 7 giorni; budget 40 pagine/giorno.
+    Lista vuota = chiave assente / squadra non mappata
+    / budget esaurito (il report semplicemente salta
+    la sezione)."""
+
+    league_id = AFB_LEAGUE_IDS.get(league)
+
+    if not league_id:
+        return []
+
+    try:
+
+        anno = _fduk_anno_corrente()
+
+        teams = _afb_get(
+            "teams",
+            {
+                "league": league_id,
+                "season": anno
+            },
+            f"afb_teams_{league_id}_{anno}",
+            7 * 86400
+        )
+
+        if not teams:
+            return []
+
+        team_id = None
+
+        for t in teams:
+
+            info = t.get("team") or {}
+
+            if _fduk_matcha(
+                team_name,
+                str(info.get("name") or "")
+            ):
+                team_id = info.get("id")
+                break
+
+        if not team_id:
+            return []
+
+        giocatori: list = []
+
+        for pagina in (1, 2, 3):
+
+            resp = _afb_get(
+                "players",
+                {
+                    "team": team_id,
+                    "season": anno,
+                    "page": pagina
+                },
+                f"afb_pl_{team_id}_{anno}_{pagina}",
+                24 * 3600,
+                budget=True
+            )
+
+            if not resp:
+                break
+
+            for pr in resp:
+
+                for st in (
+                    pr.get("statistics") or []
+                ):
+
+                    cart = st.get("cards") or {}
+
+                    g = safe_int(
+                        cart.get("yellow")
+                    )
+
+                    r = safe_int(
+                        cart.get("red")
+                    )
+
+                    if g >= 4 or r >= 1:
+
+                        giocatori.append({
+                            "nome": str(
+                                (
+                                    pr.get("player")
+                                    or {}
+                                ).get("name") or "?"
+                            ),
+                            "g": g,
+                            "r": r
+                        })
+
+            if len(resp) < 20:
+                break
+
+        visti_n = set()
+        out = []
+
+        for g in sorted(
+            giocatori,
+            key=lambda x: (-x["r"], -x["g"])
+        ):
+
+            k = normalizza_nome(g["nome"])
+
+            if k in visti_n:
+                continue
+
+            visti_n.add(k)
+            out.append(g)
+
+            if len(out) >= 6:
+                break
+
+        return out
+
+    except Exception:
+
+        return []
+
+
 def odds_api_per_partita(
     sport: str,
     home_name: str,
@@ -7656,6 +7917,35 @@ def format_report_partita(
 
     sh = analisi["stats_home"]
     sa = analisi["stats_away"]
+
+    afb_home = analisi.get("afb_home") or []
+    afb_away = analisi.get("afb_away") or []
+
+    if afb_home or afb_away:
+
+        def _afb_riga(lista):
+            return ", ".join(
+                f"{g['nome']}"
+                + (
+                    f" ({g['g']} gialli)"
+                    if g["g"] and not g["r"]
+                    else f" ({g['g']}g/{g['r']}r)"
+                )
+                for g in lista[:4]
+            )
+
+        afb_txt = (
+            "\n\n<b>\U0001f7e8 CARTELLINI A RISCHIO"
+            " (API-Football)</b>\n\n"
+            + f"{home}: {_afb_riga(afb_home) or '-'}\n"
+            + f"{away}: {_afb_riga(afb_away) or '-'}\n"
+            + "<i>Sovra-ammoniti: una gara di sospensione"
+            " e' dietro l'angolo.</i>"
+        )
+
+    else:
+
+        afb_txt = ""
 
     injuries_h = (
         analisi["injuries_home"]
@@ -7871,7 +8161,7 @@ Indice fatica: {analisi['fatica_away']}/70{trasferte_txt_away}{rientri_txt_away}
 {format_infortuni(injuries_h)}
 
 {away}:
-{format_infortuni(injuries_a)}
+{format_infortuni(injuries_a)}{afb_txt}
 
 <b>🌦 METEO (stadio)</b>
 
@@ -11134,7 +11424,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + densita' + 7 schedine - build 25 set 2026 v17"
+        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + avvisi cartellini/clima - build 25 set 2026 v17.1"
     )
 
     print(
