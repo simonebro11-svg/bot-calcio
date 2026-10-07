@@ -9077,7 +9077,9 @@ TIERS_SCHEDINE = [
         "cap": 200.0,
         "candidati": 40,
         "prob_min": 0.08,
-        "max_legs": 14
+        "min_legs": 6,
+        "max_legs": 14,
+        "max_leg_quota": 4.5
     },
     {
         "nome": "🎯 SCHEDINA SPECIALE",
@@ -9250,6 +9252,18 @@ def costruisci_schedina(
         p for p in candidati
         if p["quota"] >= QUOTA_GAMBA_MIN
     ]
+
+    # tetto di quota per gamba (es. TOP): piu'
+    # partite a quote basse invece di pochi
+    # colponi da 10+, cosi' il rischio e' sparso
+    _mlq = tier.get("max_leg_quota")
+
+    if _mlq:
+
+        candidati = [
+            p for p in candidati
+            if p["quota"] <= _mlq
+        ]
 
     # fasce prudenti: solo mercati robusti
     if tier.get("mercati_prudenti"):
@@ -11517,7 +11531,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + 7 schedine senza partite ripetute (beam largo) - build 25 set 2026 v17.5"
+        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + 7 schedine (TOP a 6+ partite, gambe 4.5 max) - build 25 set 2026 v17.6"
     )
 
     print(
