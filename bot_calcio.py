@@ -3534,7 +3534,7 @@ def _stat_mercati(
         st = _fduk_stats_lega(league)
 
         if not st:
-            return {}, 0
+            return {}, 0, {}
 
         squadre = st["squadre"]
         lg = st["lg"]
@@ -3556,7 +3556,7 @@ def _stat_mercati(
                 fa = nome
 
         if not fh or not fa or fh == fa:
-            return {}, 0
+            return {}, 0, {}
 
         def rate(
             nome: str,
@@ -3609,9 +3609,11 @@ def _stat_mercati(
         )
 
         attesi = {
-            "corner": c_h + c_a,
-            "cartellini": y_h + y_a,
-            "tiri": s_h + s_a
+            "corner": round(c_h + c_a, 1),
+            "cartellini": round(y_h + y_a, 1),
+            "tiri": round(s_h + s_a, 1),
+            "cart_h": round(y_h, 1),
+            "cart_a": round(y_a, 1)
         }
 
         n_min = int(
@@ -3657,11 +3659,11 @@ def _stat_mercati(
             )
         )
 
-        return mercati, aff
+        return mercati, aff, attesi
 
     except Exception:
 
-        return {}, 0
+        return {}, 0, {}
 
 
 def _fduk_url_anno(
@@ -7190,7 +7192,7 @@ def analizza_partita(
         key=mercati.get
     )
 
-    spec_mercati, spec_aff = _stat_mercati(
+    spec_mercati, spec_aff, spec_att = _stat_mercati(
         league, home_name, away_name
     )
 
@@ -7220,6 +7222,7 @@ def analizza_partita(
         "mercati_avanzati": avanzati,
         "mercati_speciale": spec_mercati,
         "affidabilita_speciale": spec_aff,
+        "stat_atteso": spec_att,
         "esatto_top": esatto_top,
         "htft_top": htft_top,
         "over25_raw": over25_raw,
@@ -7947,6 +7950,27 @@ def format_report_partita(
 
         afb_txt = ""
 
+    # cartellini ATTESI a livello squadra/partita
+    # (medie stagione fduk, nessuna chiave esterna)
+    _sa = analisi.get("stat_atteso") or {}
+
+    if _sa.get("cartellini"):
+
+        stat_txt = (
+            "\n\n<b>\U0001f7e8 CARTELLINI ATTESI"
+            " (medie stagione)</b>\n\n"
+            + f"{home}: {_sa.get('cart_h', '?')}"
+            + f" \u00b7 {away}: {_sa.get('cart_a', '?')}"
+            + f" \u2192 ~{_sa['cartellini']} totali\n"
+            + "<i>Stima da football-data.co.uk "
+            "(fatti + subiti, correzione lega)."
+            "</i>"
+        )
+
+    else:
+
+        stat_txt = ""
+
     injuries_h = (
         analisi["injuries_home"]
     )
@@ -8161,7 +8185,7 @@ Indice fatica: {analisi['fatica_away']}/70{trasferte_txt_away}{rientri_txt_away}
 {format_infortuni(injuries_h)}
 
 {away}:
-{format_infortuni(injuries_a)}{afb_txt}
+{format_infortuni(injuries_a)}{afb_txt}{stat_txt}
 
 <b>🌦 METEO (stadio)</b>
 
@@ -9072,7 +9096,8 @@ def _beam_schedina(
     pav: float,
     cap: float,
     max_legs: int,
-    min_legs: int = 1
+    min_legs: int = 1,
+    beam_w: int = 240
 ) -> Optional[tuple]:
 
     """Ricerca a fascio (beam search) della
@@ -9094,7 +9119,9 @@ def _beam_schedina(
 
     pool = list(candidati)[:60]
 
-    beam_w = 240
+    # (larghezza passabile: la usiamo piu'
+    # larga al primo tentativo senza ripetizioni)
+
 
     best = None  # (score, gambe, quota_tot)
 
@@ -9207,7 +9234,8 @@ def _beam_schedina(
 
 def costruisci_schedina(
     tier: Dict[str, Any],
-    picks_ordinate: List[Dict[str, Any]]
+    picks_ordinate: List[Dict[str, Any]],
+    beam_w: int = 240
 ) -> Optional[Dict[str, Any]]:
 
     candidati = [
@@ -9306,7 +9334,8 @@ def costruisci_schedina(
         tier["pav"],
         tier["cap"],
         tier["max_legs"],
-        tier.get("min_legs", 1)
+        tier.get("min_legs", 1),
+        beam_w
     )
 
     if not best:
@@ -9491,6 +9520,14 @@ def format_schedina(
                 "\u26a0\ufe0f\U0001f4f0 notizie da "
                 "verificare su una delle due squadre"
             )
+
+    if schedina.get("_riuso"):
+
+        righe.append(
+            "\u26a0\ufe0f <i>Pool corto: questa schedina "
+            "include una partita gia' presente in "
+            "un'altra schedina.</i>"
+        )
 
     righe.append("")
     righe.append(
@@ -9828,18 +9865,41 @@ def crea_schedine(
 
     schedine = []
 
+    # partite GIA' usate nelle schedine precedenti:
+    # ogni partita puo' comparire in UNA sola
+    # schedina (richiesta utente). Il SPECIALE usa
+    # lo stesso match_key: la regola vale anche per
+    # lui. Fallback: se la fascia non si chiude
+    # senza ripetizioni (pool corto), si costruisce
+    # comunque la schedina riusando, con avviso.
+    usati: set = set()
+
     for tier in TIERS_SCHEDINE:
+
+        pool_tier = (
+            picks_spec_ordinate
+            if tier.get("pool")
+            == "speciale"
+            else picks_ordinate
+        )
+
+        freschi = [
+            p for p in pool_tier
+            if p["match_key"] not in usati
+        ]
+
+        s = None
 
         try:
 
+            # fascio largo (800) al tentativo pulito:
+            # le fasce strette (40-45) con il pool
+            # ridotto dalle esclusioni meritano piu'
+            # stati esplorati prima di arrendersi
             s = costruisci_schedina(
                 tier,
-                (
-                    picks_spec_ordinate
-                    if tier.get("pool")
-                    == "speciale"
-                    else picks_ordinate
-                )
+                freschi,
+                800
             )
 
         except Exception as exc:
@@ -9852,7 +9912,40 @@ def crea_schedine(
 
             s = None
 
+        if not s:
+
+            try:
+
+                s = costruisci_schedina(
+                    tier,
+                    pool_tier
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"❌ Errore costruzione "
+                    f"schedina {tier['nome']}: "
+                    f"{exc}"
+                )
+
+                s = None
+
+            if s:
+
+                s["_riuso"] = True
+
+                print(
+                    f"   ⚠️ {tier['nome']}: "
+                    "fascia chiusa solo riusando "
+                    "partite gia' presenti in "
+                    "altre schedine"
+                )
+
         if s:
+
+            for _leg in s["legs"]:
+                usati.add(_leg["match_key"])
 
             schedine.append(s)
 
@@ -11424,7 +11517,7 @@ def main():
     )
 
     print(
-        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + avvisi cartellini/clima + log chiavi - build 25 set 2026 v17.2"
+        "\U0001f4a3 Dixon-Coles + Elo + rating casa/trasferta + rientri a carico + 7 schedine senza partite ripetute (beam largo) - build 25 set 2026 v17.5"
     )
 
     print(
